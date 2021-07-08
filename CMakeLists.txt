@@ -3,7 +3,7 @@ project(qtasyncfuture VERSION 1.0.0 LANGUAGES CXX)
 
 add_library(qtasyncfuture INTERFACE)
 target_include_directories(qtasyncfuture INTERFACE
-    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}>
     $<INSTALL_INTERFACE:include>)
 
 if(ENABLE_TESTING)
