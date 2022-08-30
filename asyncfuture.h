@@ -8,6 +8,8 @@
 #include <QCoreApplication>
 #include <QMutex>
 #include <functional>
+#include <QRegularExpression>
+#include <QVariant>
 
 #define ASYNCFUTURE_ERROR_OBSERVE_VOID_WITH_ARGUMENT "Observe a QFuture<void> but your callback contains an input argument"
 #define ASYNCFUTURE_ERROR_CALLBACK_NO_MORE_ONE_ARGUMENT "Callback function should not take more than 1 argument"
@@ -498,11 +500,11 @@ public:
         });
 
         QObject::connect(watcher, &QFutureWatcher<ANY>::paused, this, [=](){
-            thiz->setPaused(true);
+            thiz->setSuspended(true);
         });
 
         QObject::connect(watcher, &QFutureWatcher<ANY>::resumed, this, [=](){
-            thiz->setPaused(false);
+            thiz->setSuspended(false);
         });
 
         watcher->setFuture(future);
@@ -883,7 +885,7 @@ public:
         int index = count++;
 
 
-        auto info = new FutureInfo(future);
+        auto info = new FutureInfo(QFuture<void>(future));
         futures.append(info);
         Q_ASSERT(index == futures.size() - 1);
 
@@ -1096,11 +1098,11 @@ public:
     QMetaObject::Connection conn;
     QPointer<QObject> sender;
 
-    inline bool bind(QObject* source,QString signal) {
+    inline bool bind(QObject* source, QString signal) {
         sender = source;
 
         // Remove leading number
-        signal = signal.replace(QRegExp("^[0-9]*"), "");
+        signal = signal.replace(QRegularExpression("^[0-9]*"), "");
 
         const int memberOffset = QObject::staticMetaObject.methodCount();
 
@@ -1141,9 +1143,9 @@ public:
                 QVariant v;
 
                 if (parameterTypes.count() > 0) {
-                    const QMetaType::Type type = static_cast<QMetaType::Type>(parameterTypes.at(0));
+                    const QMetaType type = QMetaType(parameterTypes.at(0));
 
-                    if (type == QMetaType::QVariant) {
+                    if (type.id() == QMetaType::QVariant) {
                         v = *reinterpret_cast<QVariant *>(_a[1]);
                     } else {
                         v = QVariant(type, _a[1]);
