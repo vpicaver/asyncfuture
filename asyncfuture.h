@@ -500,11 +500,11 @@ public:
         });
 
         QObject::connect(watcher, &QFutureWatcher<ANY>::paused, this, [=](){
-            thiz->setSuspended(true);
+            thiz->future().togglePaused();
         });
 
         QObject::connect(watcher, &QFutureWatcher<ANY>::resumed, this, [=](){
-            thiz->setSuspended(false);
+            thiz->future().resume();
         });
 
         watcher->setFuture(future);
@@ -1148,7 +1148,7 @@ public:
                     if (type.id() == QMetaType::QVariant) {
                         v = *reinterpret_cast<QVariant *>(_a[1]);
                     } else {
-                        v = QVariant(type, _a[1]);
+                        v = QVariant(type.id(), _a[1]);
                     }
                 }
                 callback(v);
