@@ -164,17 +164,17 @@ bool TestRunner::run(QString path, const QStringList &arguments)
     s[idx++] = executable.toUtf8().data();
 
     foreach (QString p , paths) {
-        s[idx++] = _strdup("-import");
-        s[idx++] = _strdup(p.toUtf8().data());
+        s[idx++] = strdup("-import");
+        s[idx++] = strdup(p.toUtf8().data());
     }
 
     foreach( QString arg,args) {
-        s[idx++] = _strdup(arg.toUtf8().data());
+        s[idx++] = strdup(arg.toUtf8().data());
     }
     s[idx++] = 0;
 
     const char *name = "QuickTests";
-    const char *source = _strdup(path.toUtf8().data());
+    const char *source = strdup(path.toUtf8().data());
 
 
     bool error =  quick_test_main( idx-1, s, name, source);
