@@ -9,7 +9,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED True)
 #find_package(Qt6 6.5 REQUIRED COMPONENTS Test QuickTest Concurrent Qml Quick)
 
 # Initialize variables to store required Qt components
-set(QT_COMPONENTS Test Concurrent Qml Quick QuickTest)
+set(QT_COMPONENTS Test Gui Concurrent Qml Quick QuickTest)
 
 # Attempt to find Qt6 first
 #find_package(Qt6 6.0 QUIET COMPONENTS ${QT_COMPONENTS})
