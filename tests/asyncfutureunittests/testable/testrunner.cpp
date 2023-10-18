@@ -7,6 +7,7 @@
 #include "testrunner.h"
 #include "automator.h"
 #include "priv/objectutils.h"
+#include <QRegularExpression>
 
 static TestRunner *m_defaultInstance = 0;
 
@@ -56,11 +57,18 @@ bool TestRunner::exec(QStringList arguments)
     QVariant item;
     bool error = false;
 
+#if QT_VERSION >= 0x060000
+    auto type = item.typeId();
+#elif QT_VERSION >= 0x050000
+    auto type = (int)item.type();
+#endif
+
+
     foreach (item,m_testObjects) {
         object = item.value<QObject*>();
         if (object) {
             error |= run(object, m_arguments);
-        } else if (item.typeId() == QMetaType::QString) {
+        } else if (type == QMetaType::QString) {
             error |= run(item.toString(), m_arguments);
         }
     }
@@ -156,17 +164,17 @@ bool TestRunner::run(QString path, const QStringList &arguments)
     s[idx++] = executable.toUtf8().data();
 
     foreach (QString p , paths) {
-        s[idx++] = strdup("-import");
-        s[idx++] = strdup(p.toUtf8().data());
+        s[idx++] = _strdup("-import");
+        s[idx++] = _strdup(p.toUtf8().data());
     }
 
     foreach( QString arg,args) {
-        s[idx++] = strdup(arg.toUtf8().data());
+        s[idx++] = _strdup(arg.toUtf8().data());
     }
     s[idx++] = 0;
 
     const char *name = "QuickTests";
-    const char *source = strdup(path.toUtf8().data());
+    const char *source = _strdup(path.toUtf8().data());
 
 
     bool error =  quick_test_main( idx-1, s, name, source);

@@ -500,9 +500,15 @@ public:
             thiz->reportStarted();
         });
 
+#if QT_VERSION >= 0x060000
         QObject::connect(watcher, &QFutureWatcher<ANY>::suspending, this, [=](){
             thiz->future().toggleSuspended();
         });
+#elif QT_VERSION >= 0x050000
+        QObject::connect(watcher, &QFutureWatcher<ANY>::paused, this, [=](){
+            thiz->future().togglePaused();
+        });
+#endif
 
         QObject::connect(watcher, &QFutureWatcher<ANY>::resumed, this, [=](){
             thiz->future().resume();
@@ -517,9 +523,15 @@ public:
             QFutureInterface<T>::reportStarted();
         }
 
+#if QT_VERSION >= 0x060000
         if (future.isSuspended()) {
             QFutureInterface<T>::setSuspended(true);
         }
+#elif QT_VERSION >= 0x050000
+        if (future.isPaused()) {
+            QFutureInterface<T>::setPaused(true);
+        }
+#endif
     }
 
     bool isFinished() const {
@@ -1151,7 +1163,12 @@ public:
                     if (type.id() == QMetaType::QVariant) {
                         v = *reinterpret_cast<QVariant *>(_a[1]);
                     } else {
+#if QT_VERSION >= 0x060000
                         v = QVariant(type, _a[1]);
+#elif QT_VERSION >= 0x050000
+                        v = QVariant(type.id(), _a[1]);
+#endif
+
                     }
                 }
                 callback(v);
@@ -1179,11 +1196,13 @@ auto callIgnoreReturn(Functor& functor, QFuture<T> value)
 }
 
 // Case 2: Functor takes T directly
+#if QT_VERSION >= 0x060000
 template <typename Functor, typename T>
 auto callIgnoreReturn(Functor& functor, QFuture<T> value)
     -> std::enable_if_t<std::is_invocable_v<Functor, T>, CallerRetType<Functor, T>> {
     functor(value.result());
 }
+#endif
 
 // Case 3: Unsupported
 template <typename Functor, typename T>
@@ -1199,11 +1218,13 @@ auto call(Functor& functor, QFuture<T> value)
 }
 
 // Case 2: Functor takes T directly
+#if QT_VERSION >= 0x060000
 template <typename Functor, typename T>
 auto call(Functor& functor, QFuture<T> value)
     -> std::enable_if_t<std::is_invocable_v<Functor, T>, CallerRetType<Functor, T>> {
     return functor(value.result());
 }
+#endif
 
 // Case 3: Unsupported
 template <typename Functor, typename T>

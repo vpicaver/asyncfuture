@@ -6,9 +6,30 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
 # Find the Qt package
-find_package(Qt6 6.5 REQUIRED COMPONENTS Test QuickTest Concurrent Qml Quick)
+#find_package(Qt6 6.5 REQUIRED COMPONENTS Test QuickTest Concurrent Qml Quick)
 
-qt_standard_project_setup()
+# Initialize variables to store required Qt components
+set(QT_COMPONENTS Test Concurrent Qml Quick QuickTest)
+
+# Attempt to find Qt6 first
+find_package(Qt6 6.5 QUIET COMPONENTS ${QT_COMPONENTS})
+
+if(Qt6_FOUND)
+  message(STATUS "Using Qt6")
+  qt6_standard_project_setup()
+else()
+  # If Qt6 is not found, attempt to find Qt5
+  find_package(Qt5 5.15 REQUIRED COMPONENTS ${QT_COMPONENTS})
+  if(Qt5_FOUND)
+    message(STATUS "Using Qt5")
+    # Your Qt5-specific setup logic here, if any
+  else()
+    message(FATAL_ERROR "Neither Qt6 nor Qt5 was found!")
+  endif()
+endif()
+
+
+#qt_standard_project_setup()
 
 # Add qtshell
 add_library(qtshell STATIC
@@ -54,8 +75,8 @@ target_include_directories(testrunner PUBLIC asyncfutureunittests/testable)
 target_include_directories(testrunner PRIVATE asyncfutureunittests/testable/priv)
 
 
-# Define the executable target
-qt_add_executable(asyncfutureunittests
+# List of source files
+set(SOURCE_FILES
     asyncfutureunittests/main.cpp
     asyncfutureunittests/FinishedAndCancelThread.cpp
     asyncfutureunittests/example.cpp
@@ -66,6 +87,17 @@ qt_add_executable(asyncfutureunittests
     asyncfutureunittests/trackingdata.cpp
     asyncfutureunittests/spec.cpp
 )
+
+# Define the executable target
+# Define the executable target
+if(Qt6_FOUND)
+    qt6_add_executable(asyncfutureunittests ${SOURCE_FILES})
+else()
+    add_executable(asyncfutureunittests ${SOURCE_FILES})
+    set_target_properties(asyncfutureunittests PROPERTIES AUTOMOC TRUE)
+    set_target_properties(qtshell PROPERTIES AUTOMOC TRUE)
+    set_target_properties(testrunner PROPERTIES AUTOMOC TRUE)
+endif()
 
 # Specify the include directories and compile definitions
 target_include_directories(asyncfutureunittests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
