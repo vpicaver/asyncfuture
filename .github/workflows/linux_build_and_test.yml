@@ -1,0 +1,41 @@
+name: Build and Test with ASan and Different Qt Versions
+
+on:
+  push:
+    branches:
+      - master
+      - dev
+  pull_request:
+    branches:
+      - master
+      - dev
+
+jobs:
+  build_and_test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        qt_version: ['5', '6']
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+
+    - name: Setup CMake and Ninja
+      uses: lukka/get-cmake@v3.21.1
+
+    - name: Setup C++ Compiler
+      run: sudo apt-get update && sudo apt-get install -y g++-10
+      run: sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 60 --slave /usr/bin/g++ g++ /usr/bin/g++-10
+
+    - name: Install Qt
+      run: sudo apt-get install -y qt${{ matrix.qt_version }}base qt${{ matrix.qt_version }}tools libqt${{ matrix.qt_version }}test5 libqt${{ matrix.qt_version }}concurrent5 qml-module-qt${{ matrix.qt_version }}-quick2 qml-module-qtquick-test
+
+    - name: Create Build Environment
+      run: cmake -S . -B build -G Ninja -DENABLE_TESTING:BOOL=ON -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS="-fsanitize=address"
+
+    - name: Build Project
+      run: cmake --build build
+
+    - name: Run Tests
+      run: cd build && ctest --output-on-failure -T Test
