@@ -65,7 +65,7 @@ void BugTests::test_nested_context()
 
     Actor actor;
 
-    QFuture<void> future = actor.action2();
+    QFuture<void> future = QFuture<void>(actor.action2());
 
     QVERIFY(waitUntil(future, 1000));
 }
@@ -82,7 +82,7 @@ void BugTests::test_nested_subscribe_in_thread()
         });
     };
 
-    QtConcurrent::run(worker);
+    QThreadPool::globalInstance()->start(worker);
 
     QVERIFY(waitUntil([&]() {
         return called;
@@ -123,7 +123,7 @@ void BugTests::test_nested_context_in_thread()
         loop.exec();
     };
 
-    QtConcurrent::run(worker);
+    QThreadPool::globalInstance()->start(worker);
 
     QVERIFY(waitUntil([&]() {
         return called;

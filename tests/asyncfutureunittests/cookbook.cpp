@@ -49,7 +49,7 @@ void Cookbook::run_mapped()
             defer.complete(future);
         };
 
-        QtConcurrent::run(worker);
+        QThreadPool::globalInstance()->start(worker);
 
         auto future = defer.future();
 

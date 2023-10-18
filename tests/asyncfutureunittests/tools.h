@@ -91,7 +91,9 @@ namespace Tools {
                 int index = context->index ;
                 if (index < context->input.size()) {
                     auto worker = context->worker;
-                    QtConcurrent::run(pool, worker, index);
+                    pool->start([index, worker]() {
+                        worker(index);
+                    });
                     context->index++;
                 }
 
@@ -112,7 +114,10 @@ namespace Tools {
         defer.setProgressRange(0, input.size());
 
         for (int i = 0 ; i < insertCount ; i++) {
-            QtConcurrent::run(pool, context->worker, i);
+            auto worker = context->worker;
+            pool->start([i, worker]() {
+                worker(i);
+            });
         }
 
         return defer.future();

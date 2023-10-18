@@ -1,8 +1,8 @@
 #include <QString>
 #include <QtTest>
 #include <TestRunner>
-#include <QtQuickTest>
-#include <XBacktrace.h>
+//#include <QtQuickTest>
+//#include <XBacktrace.h>
 #include "example.h"
 #include "spec.h"
 #include "bugtests.h"
@@ -21,7 +21,7 @@ static void waitForFinished(QThreadPool *pool)
 
 int main(int argc, char *argv[])
 {
-    XBacktrace::enableBacktraceLogOnUnhandledException();
+//    XBacktrace::enableBacktraceLogOnUnhandledException();
 
     QCoreApplication app(argc, argv);
 

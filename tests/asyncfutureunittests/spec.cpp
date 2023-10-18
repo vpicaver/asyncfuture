@@ -656,7 +656,7 @@ void Spec::test_Observable_signal_by_signature()
         // Observe a signal with no argument
         auto proxy = new SignalProxy(this);
 
-        QFuture<void> vFuture = observe(proxy, SIGNAL(proxy0())).future();
+        QFuture<void> vFuture = QFuture<void>(observe(proxy, SIGNAL(proxy0())).future());
 
         QCOMPARE(vFuture.isFinished(), false);
         QCOMPARE(vFuture.isRunning(), true);
@@ -1139,8 +1139,8 @@ void Spec::test_Observable_setProgressValue()
     QCOMPARE(future.progressMinimum(), 0);
     QCOMPARE(future.progressMaximum(), 0);
 
-    defer.setProgressValue(10);
     defer.setProgressRange(5, 30);
+    defer.setProgressValue(10);
 
     QCOMPARE(future.progressValue(), 10);
     QCOMPARE(future.progressMinimum(), 5);
@@ -1503,7 +1503,7 @@ void Spec::test_Deferred_across_thread()
         defer.complete(99);
     };
 
-    QtConcurrent::run(worker);
+    QThreadPool::globalInstance()->start(worker);
 
     Test::waitUntil(defer.future());
     QCOMPARE(defer.future().result(), 99);
@@ -1682,7 +1682,7 @@ void Spec::test_Deferred_reportStarted()
         QFutureWatcher<void> watcher;
 
         connect(&watcher, &QFutureWatcher<void>::started, started());
-        watcher.setFuture(defer.future());
+        watcher.setFuture(QFuture<void>(defer.future()));
 
         defer.reportStarted();
 

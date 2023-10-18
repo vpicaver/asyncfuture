@@ -1,5 +1,6 @@
 /* AsyncFuture Version: 0.4.1 */
 #pragma once
+#include <QObject>
 #include <QFuture>
 #include <QMetaMethod>
 #include <QPointer>
@@ -499,8 +500,8 @@ public:
             thiz->reportStarted();
         });
 
-        QObject::connect(watcher, &QFutureWatcher<ANY>::paused, this, [=](){
-            thiz->future().togglePaused();
+        QObject::connect(watcher, &QFutureWatcher<ANY>::suspending, this, [=](){
+            thiz->future().toggleSuspended();
         });
 
         QObject::connect(watcher, &QFutureWatcher<ANY>::resumed, this, [=](){
@@ -516,8 +517,8 @@ public:
             QFutureInterface<T>::reportStarted();
         }
 
-        if (future.isPaused()) {
-            QFutureInterface<T>::setPaused(true);
+        if (future.isSuspended()) {
+            QFutureInterface<T>::setSuspended(true);
         }
     }
 
@@ -804,7 +805,9 @@ private:
     void updateProgressRanges() {
         int newMax = parentProgress.range() + watchProgress.range();
         if(QFutureInterface<T>::progressMaximum() != newMax) {
-            QFutureInterface<T>::setProgressRange(0, newMax);
+            const auto oldProgress = QFutureInterface<T>::progressValue();
+            QFutureInterface<T>::setProgressRange(0, newMax); //This set the progress back to 0
+            QFutureInterface<T>::setProgressValue(oldProgress);
         }
     }
 
@@ -1148,7 +1151,7 @@ public:
                     if (type.id() == QMetaType::QVariant) {
                         v = *reinterpret_cast<QVariant *>(_a[1]);
                     } else {
-                        v = QVariant(type.id(), _a[1]);
+                        v = QVariant(type, _a[1]);
                     }
                 }
                 callback(v);
@@ -1161,39 +1164,54 @@ public:
 
 /* call() : Run functor(future):void */
 
+template<typename Functor, typename T>
+using CallerRetType = decltype(std::declval<Functor>()(std::declval<T>()));
+
+
+template <typename Future> struct is_qfuture : std::false_type {};
+template <typename T> struct is_qfuture<QFuture<T>> : std::true_type { };
+
+// Case 1: Functor takes QFuture<T>
 template <typename Functor, typename T>
-typename std::enable_if<is_callable<Functor, T>::value, void>::type
-callIgnoreReturn(Functor& functor, QFuture<T>& future) {
-    functor(future);
+auto callIgnoreReturn(Functor& functor, QFuture<T> value)
+    -> std::enable_if_t<std::is_invocable_v<Functor, QFuture<T>>, CallerRetType<Functor, QFuture<T>>> {
+    functor(value);
 }
 
+// Case 2: Functor takes T directly
 template <typename Functor, typename T>
-typename std::enable_if<!is_callable<Functor, T>::value, void>::type
-callIgnoreReturn(Functor& functor, QFuture<T>& future) {
-    Q_UNUSED(functor);
-    Q_UNUSED(future);
-    /* Unlike clang, VC 2017 may not instantiate this function if another
-     * static_assert is triggered.
-     */
-    static_assert(False<T>::value, ASYNCFUTURE_ERROR_ARGUMENT_MISMATCHED);
+auto callIgnoreReturn(Functor& functor, QFuture<T> value)
+    -> std::enable_if_t<std::is_invocable_v<Functor, T>, CallerRetType<Functor, T>> {
+    functor(value.result());
 }
 
+// Case 3: Unsupported
 template <typename Functor, typename T>
-typename std::enable_if<is_callable<Functor, T>::value, RetType<Functor>>::type
-call(Functor& functor, QFuture<T>& future) {
-    return functor(future);
+auto callIgnoreReturn(Functor& functor, QFuture<T> value) -> std::enable_if_t<!std::is_invocable_v<Functor, QFuture<T>> && !std::is_invocable_v<Functor, T>, void> {
+    static_assert(sizeof(Functor) == 0, "The callback function is not callable. The input argument doesn't match with the observing QFuture type");
 }
 
+// Case 1: Functor takes QFuture<T>
 template <typename Functor, typename T>
-typename std::enable_if<!is_callable<Functor, T>::value, RetType<Functor>>::type
-call(Functor& functor, QFuture<T>& future) {
-    Q_UNUSED(functor);
-    Q_UNUSED(future);
-    static_assert(False<T>::value, ASYNCFUTURE_ERROR_ARGUMENT_MISMATCHED);
+auto call(Functor& functor, QFuture<T> value)
+    -> std::enable_if_t<std::is_invocable_v<Functor, QFuture<T>>, CallerRetType<Functor, QFuture<T>>> {
+    return functor(value);
+}
+
+// Case 2: Functor takes T directly
+template <typename Functor, typename T>
+auto call(Functor& functor, QFuture<T> value)
+    -> std::enable_if_t<std::is_invocable_v<Functor, T>, CallerRetType<Functor, T>> {
+    return functor(value.result());
+}
+
+// Case 3: Unsupported
+template <typename Functor, typename T>
+auto call(Functor& functor, QFuture<T> value) -> std::enable_if_t<!std::is_invocable_v<Functor, QFuture<T>> && !std::is_invocable_v<Functor, T>, void> {
+    static_assert(sizeof(Functor) == 0, "The callback function is not callable. The input argument doesn't match with the observing QFuture type");
 }
 
 /* eval() : Evaluate the expression - "return functor(future)" that may have a void return type */
-
 template <typename Functor, typename T>
 typename std::enable_if<ret_type_is_void<Functor>::value && arg_count_is_zero<Functor>::value,
 Value<RetType<Functor>>>::type
@@ -1791,6 +1809,7 @@ template <typename T>
 QFuture<T> completed(const T &val) {
    QFutureInterface<T> fi;
    fi.setProgressRange(0, 1);
+   fi.setProgressValue(1);
    fi.reportFinished(&val);
    return QFuture<T>(&fi);
 }
@@ -1800,6 +1819,7 @@ QFuture<T> completed(const QList<T> &val) {
     QFutureInterface<T> fi;
     if(!val.isEmpty()) {
         fi.setProgressRange(0, val.size());
+        fi.setProgressValue(val.size());
         fi.reportResults(val.toVector());
     }
     fi.reportFinished();

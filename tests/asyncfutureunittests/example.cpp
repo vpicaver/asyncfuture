@@ -47,8 +47,8 @@ void Example::example_Timer_timeout()
     timer->setInterval(50);
 
     // Convert a signal from QObject into QFuture
-    QFuture<void> future = observe(timer,
-                                   &QTimer::timeout).future();
+    QFuture<void> future = QFuture<void>(observe(timer,
+                                                 &QTimer::timeout).future());
 
     // Listen from the future without using QFutureWatcher<T>
     observe(future).subscribe([]() {
@@ -88,7 +88,7 @@ void Example::example_combine_multiple_future()
     // Combine multiple futures with different type into a single future
     QFuture<QImage> f1 = QtConcurrent::run(readImage, QString("image.jpg"));
 
-    QFuture<void> f2 = observe(timer, &QTimer::timeout).future();
+    QFuture<void> f2 = QFuture<void>(observe(timer, &QTimer::timeout).future());
 
     QFuture<QImage> result = (combine() << f1 << f2).subscribe([=](){
         // Read an image but do not return before timeout
