@@ -577,12 +577,12 @@ public:
 
     void complete(QFuture<T> future) {
         incWeakRefCount();
-        auto onFinished = [=]() {
+        auto onFinished = [this, future]() {
             this->completeByFinishedFuture<T>(future);
             this->decWeakRefCount();
         };
 
-        auto onCanceled = [=]() {
+        auto onCanceled = [this]() {
             this->cancel();
             this->decWeakRefCount();
         };
@@ -596,7 +596,7 @@ public:
         [](int,int){}
         );
 
-        auto pushCancel = [=]() {
+        auto pushCancel = [future]() {
             auto tmpFuture = future;
             tmpFuture.cancel();
         };
@@ -618,12 +618,12 @@ public:
     void complete(QFuture<QFuture<ANY>> future) {
         incWeakRefCount();
 
-        auto onFinished = [=]() {
+        auto onFinished = [this, future]() {
             complete(future.result());
             this->decWeakRefCount();
         };
 
-        auto onCanceled = [=]() {
+        auto onCanceled = [this]() {
             this->cancel();
             this->decWeakRefCount();
         };
@@ -650,7 +650,7 @@ public:
 	void cancel(const QObject* sender, Member member) {
         incWeakRefCount();
         QObject::connect(sender, member,
-                         this, [=]() {
+                         this, [this]() {
             this->cancel();
             decWeakRefCount();
         });
@@ -909,14 +909,14 @@ public:
         }
         info->value = future.progressValue();
 
-        auto progressFunc = [=](int progressValue) {
+        auto progressFunc = [this, info](int progressValue) {
             mutex.lock();
             info->value = progressValue;
             updateProgress();
             mutex.unlock();
         };
 
-        auto progressRangeFunc = [=](int min, int max) {
+        auto progressRangeFunc = [this, info](int min, int max) {
             Q_UNUSED(min);
             mutex.lock();
             if(max > 0) {
@@ -930,10 +930,10 @@ public:
         mutex.unlock();
 
         Private::watch(future, this, 0,
-                       [=]() {
+                       [this, index]() {
             completeFutureAt(index);
             decWeakRefCount();
-        },[=]() {
+        },[this, index]() {
             cancelFutureAt(index);
             decWeakRefCount();
         },
