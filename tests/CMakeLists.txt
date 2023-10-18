@@ -12,7 +12,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED True)
 set(QT_COMPONENTS Test Concurrent Qml Quick QuickTest)
 
 # Attempt to find Qt6 first
-find_package(Qt6 6.5 QUIET COMPONENTS ${QT_COMPONENTS})
+#find_package(Qt6 6.0 QUIET COMPONENTS ${QT_COMPONENTS})
+find_package(Qt6 6.0 COMPONENTS ${QT_COMPONENTS})
 
 if(Qt6_FOUND)
   message(STATUS "Using Qt6")
