@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.10)
 project(asyncfutureunittests VERSION 1.0.0 LANGUAGES CXX)
+enable_testing()
 
 # Specify the C++ standard
 set(CMAKE_CXX_STANDARD 20)
@@ -98,6 +99,7 @@ else()
     set_target_properties(qtshell PROPERTIES AUTOMOC TRUE)
     set_target_properties(testrunner PROPERTIES AUTOMOC TRUE)
 endif()
+add_test(NAME test_asyncfuture COMMAND asyncfutureunittests)
 
 # Specify the include directories and compile definitions
 target_include_directories(asyncfutureunittests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
