@@ -1,4 +1,4 @@
-name: Build and Test with ASan and Different Qt Versions
+name: Ubuntu Latest Build and Test with ASan on Qt5 and Qt6
 
 on:
   push:

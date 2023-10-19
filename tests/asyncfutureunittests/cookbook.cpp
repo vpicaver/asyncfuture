@@ -12,7 +12,7 @@ using namespace Tools;
 Cookbook::Cookbook(QObject *parent) : QObject(parent)
 {
     // This function do nothing but could make Qt Creator Autotests plugin recognize this test
-    auto ref =[=]() {
+    auto ref =[this]() {
         QTest::qExec(this, 0, 0);
     };
     Q_UNUSED(ref);
