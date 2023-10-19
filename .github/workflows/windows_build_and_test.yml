@@ -1,4 +1,4 @@
-name: Windows Latest Build and Test on Qt5 and Qt6
+name: Windows-2019 Build and Test on Qt5 and Qt6
 
 on:
   push:
