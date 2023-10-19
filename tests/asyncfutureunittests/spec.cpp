@@ -30,7 +30,7 @@ static int mapFunc(int value) {
 
 Spec::Spec(QObject *parent) : QObject(parent)
 {
-    auto ref = [=]() {
+    auto ref = [this]() {
         QTest::qExec(this, 0, 0); // Autotest detect available test cases of a QObject by looking for "QTest::qExec" in source code
     };
     Q_UNUSED(ref);

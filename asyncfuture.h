@@ -659,12 +659,12 @@ public:
     template <typename ANY>
     void cancel(QFuture<ANY> future) {
         incWeakRefCount();
-        auto onFinished = [=]() {
+        auto onFinished = [this]() {
             cancel();
             decWeakRefCount();
         };
 
-        auto onCanceled = [=]() {
+        auto onCanceled = [this]() {
             decWeakRefCount();
         };
 

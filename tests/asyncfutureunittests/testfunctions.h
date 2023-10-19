@@ -16,7 +16,7 @@ namespace Test {
     class Callable {
     public:
         Callable() : called(false) {
-            func = [=](T input) {
+            func = [this](T input) {
                 called = true;
                 value = input;
             };
@@ -31,7 +31,7 @@ namespace Test {
     class Callable<void> {
     public:
         Callable() : called(false) {
-            func = [=]() {
+            func = [this]() {
                 called = true;
             };
         }
@@ -97,7 +97,7 @@ namespace Test {
         }
 
         inline std::function<void()> operator() () {
-            return [=]() {
+            return [this]() {
                 called++;
             };
         }
