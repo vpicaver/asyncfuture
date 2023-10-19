@@ -32,8 +32,9 @@ jobs:
         version: ${{ matrix.qt_version }}
 
     - name: Create Build Environment
-      environment_script: "C:/Program Files (x86)/Microsoft Visual Studio/2019/Enterprise/VC/Auxiliary/Build/vcvars64.bat"
-      run: cmake -S . -B build -G Ninja -DENABLE_TESTING:BOOL=ON -DCMAKE_BUILD_TYPE=Debug
+      run: |
+        "C:/Program Files (x86)/Microsoft Visual Studio/2019/Enterprise/VC/Auxiliary/Build/vcvars64.bat"
+        cmake -S . -B build -G Ninja -DENABLE_TESTING:BOOL=ON -DCMAKE_BUILD_TYPE=Debug
 
     - name: Build Project
       run: cmake --build build
