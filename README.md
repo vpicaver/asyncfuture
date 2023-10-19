@@ -1,13 +1,11 @@
 ## AsyncFuture - Use QFuture like a Promise object
-[![Build status](https://ci.appveyor.com/api/projects/status/5cndw1uu5ay960c4?svg=true)](https://ci.appveyor.com/project/benlau/asyncfuture)
-[![Build Status](https://travis-ci.com/benlau/asyncfuture.svg?branch=master)](https://travis-ci.com/benlau/asyncfuture)
+![GitHub Workflow Status](https://github.com/vpicaver/asyncfuture/actions/workflows/linux_build_and_test.yml/badge.svg)
 
+This library tested using Qt 5.15 and Qt 6.2 or later.
 
 QFuture is used together with QtConcurrent to represent the result of an asynchronous computation. It is a powerful component for multi-thread programming. But its usage is limited to the result of threads, it doesn't work with the asynchronous signal emitted by QObject. And it is a bit trouble to setup the listener function via QFutureWatcher.
 
 AsyncFuture is designed to enhance the function to offer a better way to use it for asynchronous programming. It provides a Promise object like interface. This project is inspired by AsynQt and RxCpp.
-
-Remarks: You may use this project together with [QuickFuture](https://github.com/benlau/quickfuture) for QML programming.
 
 Reference Articles
 ------------------
@@ -22,6 +20,9 @@ Features
  2. Combine multiple futures with different type into a single future object
  3. Use QFuture like a Promise object
  4. Chainable Callback - Advanced multi-threading programming model
+ 5. Automatic future unwrapping
+ 6. Full chain cancellation propagation
+ 7. Automatic progress accumulation
 
 **1. Convert a signal from QObject into a QFuture object**
 
@@ -165,7 +166,7 @@ QFuture<int> f2 = observe(f1).subscribe([=](QFuture<int> future) {
 ```
 
 
-More examples are available at : [asyncfuture/example.cpp at master · benlau/asyncfuture](https://github.com/benlau/asyncfuture/blob/master/tests/asyncfutureunittests/example.cpp)
+More examples are available at : [asyncfuture/example.cpp at master · vpicaver/asyncfuture](https://github.com/vpicaver/asyncfuture/blob/master/tests/asyncfutureunittests/example.cpp)
 
 Installation
 =============
@@ -176,7 +177,7 @@ AsyncFuture is a single header library. You could just download the `asyncfuture
 
 or
 
-    wget https://raw.githubusercontent.com/benlau/asyncfuture/master/asyncfuture.h
+    wget https://raw.githubusercontent.com/vpicaver/asyncfuture/master/asyncfuture.h
 
 API
 ===
@@ -718,49 +719,22 @@ Examples
 
 There has few examples of different use-cases in this source file:
 
-[asyncfuture/example.cpp at master · benlau/asyncfuture](https://github.com/benlau/asyncfuture/blob/master/tests/asyncfutureunittests/example.cpp)
+[asyncfuture/example.cpp at master · vpicaver/asyncfuture](https://github.com/vpicaver/asyncfuture/blob/master/tests/asyncfutureunittests/example.cpp)
 
 Building Testcases
 ==================
 
-qpm needs to install, see download instructions at http://www.qpm.io/
+Open the CMakeList.txt in QtCreator and set ENABLE_TESTING to ON. Build and run ./asyncfutureunittests 
 
-After cloning the asyncfuture repository run the following commands:
-
-```shell
-
-cd asyncfuture/tests/asyncfutureunittests
-cat qpm.json
-
+From the command line
+```
+cmake -S . -B build -G Ninja -DENABLE_TESTING:BOOL=ON -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS="-fsanitize=address"
+cmake --build build
+cd build 
+./tests/asyncfutureunittests
 ```
 
-qpm.json should look something like this:
-
-```json
-
-{
-  "dependencies": [
-    "com.github.benlau.testable@1.0.2.22",
-    "com.github.benlau.qtshell@0.4.6",
-    "net.efever.xbacktrace@0.0.1"
-  ]
-}
-
-```
-
-Install all the dependencies like this:
-
-
-```shell
-
-qpm install com.github.benlau.testable@1.0.2.22
-qpm install com.github.benlau.qtshell@0.4.6
-qpm install net.efever.xbacktrace@0.0.1
-
-
-```
-
-Now open asyncfuture.pro in QtCreator and build and run testcases.
+See [github actions](https://github.com/vpicaver/asyncfuture/tree/dev/.github/workflows) for example of building the library. 
 
 
 
