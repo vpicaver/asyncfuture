@@ -23,7 +23,7 @@ Example::Example(QObject *parent) : QObject(parent)
 {
 
     // This function do nothing but could make Qt Creator Autotests plugin recognize this test
-    auto ref =[=]() {
+    auto ref =[this]() {
         QTest::qExec(this, 0, 0);
     };
     Q_UNUSED(ref);
@@ -290,7 +290,7 @@ void Example::example_fileactor()
                 };
 
                 QFuture<Session> worker = QtConcurrent::run(loader, fileName);
-                auto observer = observe(worker).context(this, [=](Session session) {
+                auto observer = observe(worker).context(this, [this, fileName](Session session) {
 
                     workers.remove(session.fileName);
                     cache.insert(fileName, new QString(session.content));

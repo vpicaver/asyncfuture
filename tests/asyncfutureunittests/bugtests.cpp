@@ -47,7 +47,7 @@ void BugTests::test_nested_context()
                 Automator::wait(50);
             };
 
-            auto cleanup = [=]() {
+            auto cleanup = [this]() {
                 auto defer = deferred<bool>();
 
                 auto future = action1();
