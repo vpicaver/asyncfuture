@@ -1,7 +1,7 @@
 ## AsyncFuture - Use QFuture like a Promise object
 ![GitHub Workflow Status](https://github.com/vpicaver/asyncfuture/actions/workflows/linux_build_and_test.yml/badge.svg)
 
-This library tested using Qt 5.15 and Qt 6.2 or later.
+AsyncFuture is a header only library tested using Qt 5.15 and Qt 6.2 or later.
 
 QFuture is used together with QtConcurrent to represent the result of an asynchronous computation. It is a powerful component for multi-thread programming. But its usage is limited to the result of threads, it doesn't work with the asynchronous signal emitted by QObject. And it is a bit trouble to setup the listener function via QFutureWatcher.
 
@@ -12,6 +12,22 @@ Reference Articles
 
 1. [Multithreading Programming with Future & Promise – E-Fever – Medium](https://medium.com/e-fever/multithreading-programming-with-future-promise-2d35e13b9404)
 1. [AsyncFuture Cookbook 1 — Calling QtConcurrent::mapped within the run function](https://medium.com/e-fever/asyncfuture-cookbook-1-calling-qtconcurrent-mapped-within-the-run-function-ba58d523a0ce)
+
+Including it into your project
+==============================
+
+### CMake
+    add_subdirectory(asyncfuture)
+    target_link_libraries(MyLib PRIVATE asyncfuture)
+### QBS
+    references: [ "asyncfuture/asyncfuture.qbs" ]
+    Application {
+        Depends { name: "asyncfuture" }
+    }
+
+### QMake
+    include(asyncfuture/asyncfuture.pri)
+
 
 Features
 ========
