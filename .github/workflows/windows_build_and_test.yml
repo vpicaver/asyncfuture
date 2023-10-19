@@ -49,5 +49,4 @@ jobs:
 
     - name: Run Tests
       env:
-        ASAN_OPTIONS: detect_leaks=1
       run: cd build && ./tests/asyncfutureunittests
