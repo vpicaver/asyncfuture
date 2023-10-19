@@ -44,7 +44,7 @@ jobs:
 
     - name: Build Project
       run: |
-      call "C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\VC\Auxiliary\Build\vcvars64.bat" && cmake --build build
+         call "C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\VC\Auxiliary\Build\vcvars64.bat" && cmake --build build
 
     - name: Run Tests
       env:
