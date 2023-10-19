@@ -546,4 +546,86 @@ void BugTests::test_chained_cancel() {
     QVERIFY(wasCancelled.future().result());
 }
 
+void BugTests::test_watch_deleted_zero_add_combined() {
+
+    bool canceledCalled = false;
+    bool finishedCalled = false;
+
+    QFutureWatcher<void> watcher;
+
+    QObject::connect(&watcher, &QFutureWatcher<void>::canceled,
+                     [&canceledCalled]() {
+                         canceledCalled = true;
+                     });
+    QObject::connect(&watcher, &QFutureWatcher<void>::finished,
+                     [&finishedCalled]() {
+                         finishedCalled = true;
+                     });
+
+    //This scope forces the combine to go out of scope before the pipeline finishes
+    //pipeline should have been canceled, because there's no futures in the pipeline
+    {
+        QList<QFuture<void>> emptyFutures;
+        auto combine = AsyncFuture::combine() << emptyFutures;
+        watcher.setFuture(combine.future());
+    }
+
+    QVERIFY(watcher.future().isCanceled() == true);
+    QVERIFY(watcher.future().isFinished() == true);
+
+    await(watcher.future(), 100);
+
+    QVERIFY(finishedCalled == false);
+    QVERIFY(canceledCalled == false);
+}
+
+void BugTests::test_watch_deleted_add_combined()
+{
+    bool canceledCalled = false;
+    bool finishedCalled = false;
+
+    QFutureWatcher<void> watcher;
+
+    QObject::connect(&watcher, &QFutureWatcher<void>::canceled,
+                     [&canceledCalled]() {
+                         canceledCalled = true;
+                     });
+    QObject::connect(&watcher, &QFutureWatcher<void>::finished,
+                     [&finishedCalled]() {
+                         finishedCalled = true;
+                     });
+
+    bool future1Ran = false;
+    bool future2Ran = false;
+
+    //This scope forces the combine to go out of scope before the pipeline finishes
+    //pipeline should stay alive
+    {
+        auto localTimeout = [](int sleepTime, bool& ran) {
+            return QtConcurrent::run([sleepTime, &ran]() {
+                QThread::currentThread()->msleep(sleepTime);
+                ran = true;
+            });
+        };
+
+        QList<QFuture<void>> futures;
+
+        futures.append(localTimeout(10, future1Ran));
+        futures.append(localTimeout(20, future2Ran));
+
+        auto combine = AsyncFuture::combine() << futures;
+        watcher.setFuture(combine.future());
+    }
+
+    QVERIFY(watcher.future().isCanceled() == false);
+    QVERIFY(watcher.future().isFinished() == false);
+
+    await(watcher.future(), 100);
+
+    QVERIFY(future1Ran == true);
+    QVERIFY(future2Ran == true);
+    QVERIFY(finishedCalled == true);
+    QVERIFY(canceledCalled == false);
+}
+
 

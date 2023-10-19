@@ -886,7 +886,7 @@ public:
             object->cancel();
             object->deleteLater();
         };
-        QSharedPointer<CombinedFuture> ptr(new CombinedFuture(settleAllMode));
+        QSharedPointer<CombinedFuture> ptr(new CombinedFuture(settleAllMode), deleter);
         ptr->weakRef = ptr.toWeakRef();
         return ptr;
     }

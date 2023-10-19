@@ -32,6 +32,8 @@ private slots:
     void test_combine_forward_cancel();
 
     void test_chained_cancel();
+    void test_watch_deleted_zero_add_combined();
+    void test_watch_deleted_add_combined();
 };
 
 #endif // BUGTESTS_H
