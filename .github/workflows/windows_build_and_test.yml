@@ -43,6 +43,7 @@ jobs:
 #        cmake -S . -B build -G Ninja -DCMAKE_C_COMPILER="cl" -DCMAKE_CXX_COMPILER="cl" -DENABLE_TESTING:BOOL=ON -DCMAKE_BUILD_TYPE=Debug
 
     - name: Build Project
+      shell: cmd
       run: |
          call "C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\VC\Auxiliary\Build\vcvars64.bat" && cmake --build build
 
