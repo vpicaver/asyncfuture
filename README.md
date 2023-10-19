@@ -1,5 +1,6 @@
 ## AsyncFuture - Use QFuture like a Promise object
 ![GitHub Workflow Status](https://github.com/vpicaver/asyncfuture/actions/workflows/linux_build_and_test.yml/badge.svg)
+
 ![GitHub Workflow Status](https://github.com/vpicaver/asyncfuture/actions/workflows/windows_build_and_test.yml/badge.svg)
 
 
