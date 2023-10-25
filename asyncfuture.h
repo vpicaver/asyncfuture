@@ -11,6 +11,7 @@
 #include <functional>
 #include <QRegularExpression>
 #include <QVariant>
+#include <type_traits>
 
 #define ASYNCFUTURE_ERROR_OBSERVE_VOID_WITH_ARGUMENT "Observe a QFuture<void> but your callback contains an input argument"
 #define ASYNCFUTURE_ERROR_CALLBACK_NO_MORE_ONE_ARGUMENT "Callback function should not take more than 1 argument"
@@ -691,8 +692,12 @@ public:
 
     template <typename R>
     void reportResult(QList<R>& value) {
-        for (int i = 0 ; i < value.size();i++) {
-            QFutureInterface<T>::reportResult(value[i], i);
+        if constexpr (std::is_same_v<QList<R>, T>) {
+            QFutureInterface<T>::reportResult(&value, -1); // Use -1 when T is QList
+        } else {
+            for (int i = 0; i < value.size(); ++i) {
+                QFutureInterface<T>::reportResult(value[i], i);
+            }
         }
     }
 

@@ -34,6 +34,9 @@ private slots:
     void test_chained_cancel();
     void test_watch_deleted_zero_add_combined();
     void test_watch_deleted_add_combined();
+
+    void test_qlist_issue23();
+    void test_qvector_issue23();
 };
 
 #endif // BUGTESTS_H

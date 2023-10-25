@@ -628,4 +628,28 @@ void BugTests::test_watch_deleted_add_combined()
     QVERIFY(canceledCalled == false);
 }
 
+void BugTests::test_qlist_issue23() {
+    auto foo = []()->QFuture<QList<double>> {
+        AsyncFuture::Deferred<QList<double>> terrain_fetched;
+        terrain_fetched.complete(QList<double>({1, 2, 3}));
+        return terrain_fetched.future();
+    };
+
+    QFuture<QList<double>> future = foo();
+    QList<double> values = future.result();
+    QVERIFY(values == QList<double>({1, 2, 3}));
+}
+
+void BugTests::test_qvector_issue23() {
+    auto foo = []()->QFuture<QVector<double>> {
+        AsyncFuture::Deferred<QVector<double>> terrain_fetched;
+        terrain_fetched.complete(QVector<double>({1, 2, 3}));
+        return terrain_fetched.future();
+    };
+
+    QFuture<QVector<double>> future = foo();
+    QVector<double> values = future.result();
+    QVERIFY(values == QVector<double>({1, 2, 3}));
+}
+
 
