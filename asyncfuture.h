@@ -643,10 +643,10 @@ public:
         // Used internally for linking to the context object.
         // weakRef is used because we don't want the long lived context object to keep
         // deferred alive.
-        auto weakRef = this->weakRef;
+        auto weakRef_ = this->weakRef;
         QObject::connect(sender, member,
-                         this, [weakRef]() {
-            auto self = weakRef.toStrongRef();
+                         this, [weakRef_]() {
+            auto self = weakRef_.toStrongRef();
             if (!self.isNull()) {
                 self->cancel();
             }
