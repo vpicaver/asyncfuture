@@ -206,12 +206,33 @@ AsyncFuture::observe(QObject* object, PointerToMemberFunc signal)
 
 This function creates an Observable&lt;ARG&gt; object which contains a future to represent the result of the signal. You could obtain the future by the future() method. And observe the result by subscribe() / context() methods
 
-The ARG type is equal to the first parameter of the signal. If the signal does not contain any argument, ARG will be void. In case it has more than one argument, the rest will be ignored.
+The ARG type is equal to the first parameter of the signal. If the signal does not contain any argument, ARG will be void. Note that having more than one argument may result in a syntax error.
 
 ```c++
 QFuture<void> f1 = observe(timer, &QTimer::timeout).future();
 QFuture<bool> f2 = observe(button, &QAbstractButton::toggled).future();
 ```
+
+To support signals with multiple arguments, use a AsyncFuture::deferred, for example:
+
+```c++
+auto proc = QSharedPointer<QProcess>(new QProcess());
+
+struct Finished {
+    int exitCode = -1;
+    QProcess::ExitStatus status = QProcess::CrashExit;
+};
+
+auto deferred = AsyncFuture::deferred<Finished>();
+QObject::connect(proc.get(), QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+                 [&](int code, QProcess::ExitStatus status) {
+    //Signal that the deferred is done
+    deferred.complete({code, status});
+});
+
+proc->start(QString("ls"), QStringList());
+```
+
 
 See [Observable`<T>`](#observablet)
 

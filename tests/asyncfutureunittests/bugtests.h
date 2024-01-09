@@ -9,8 +9,6 @@ class BugTests : public QObject
 public:
     explicit BugTests(QObject *parent = nullptr);
 
-signals:
-
 private slots:
     void test_nested_context();
 
@@ -37,6 +35,8 @@ private slots:
 
     void test_qlist_issue23();
     void test_qvector_issue23();
+
+    void test_qprocess_finished_vpicaver_issue4();
 };
 
 #endif // BUGTESTS_H

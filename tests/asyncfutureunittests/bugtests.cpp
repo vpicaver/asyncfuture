@@ -652,4 +652,24 @@ void BugTests::test_qvector_issue23() {
     QVERIFY(values == QVector<double>({1, 2, 3}));
 }
 
+void BugTests::test_qprocess_finished_vpicaver_issue4() {
+    auto proc = QSharedPointer<QProcess>(new QProcess());
 
+    struct Finished {
+        int exitCode = -1;
+        QProcess::ExitStatus status = QProcess::CrashExit;
+    };
+
+    auto deferred = AsyncFuture::deferred<Finished>();
+    QObject::connect(proc.get(), QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+                     [&](int code, QProcess::ExitStatus status) {
+        deferred.complete({code, status});
+    });
+
+    proc->start(QString("ls"), QStringList());
+
+    await(deferred.future(), 100);
+
+    QVERIFY(deferred.future().result().exitCode == proc->exitCode());
+    QVERIFY(deferred.future().result().status == proc->exitStatus());
+}
