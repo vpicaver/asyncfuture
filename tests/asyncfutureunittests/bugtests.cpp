@@ -668,8 +668,16 @@ void BugTests::test_qprocess_finished_vpicaver_issue4() {
 
     proc->start(QString("ls"), QStringList());
 
+    bool subscribeCalled = false;
+    deferred.subscribe([&subscribeCalled, proc](Finished finished) {
+        QVERIFY(finished.exitCode == proc->exitCode());
+        QVERIFY(finished.status == proc->exitStatus());
+        subscribeCalled = true;
+    });
+
     await(deferred.future(), 100);
 
     QVERIFY(deferred.future().result().exitCode == proc->exitCode());
     QVERIFY(deferred.future().result().status == proc->exitStatus());
+    QVERIFY(subscribeCalled == true);
 }
