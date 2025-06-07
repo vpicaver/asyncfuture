@@ -1806,10 +1806,10 @@ QFuture<T> completed(const QList<T> &val) {
     fi.reportFinished();
     return QFuture<T>(&fi);
 }
-}
 
-template<class T>
-static bool waitForFinished(QFuture<T> future, int timeout = -1) {
+
+template<typename T>
+bool waitForFinished(QFuture<T> future, int timeout = -1) {
     if (future.isFinished()) {
         return true;
     }
@@ -1893,3 +1893,4 @@ private:
         }
     }
 };
+}
