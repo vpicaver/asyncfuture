@@ -116,4 +116,8 @@ private slots:
     void test_completed();
     void test_Combinator_add_to_already_finished_finished();
     void test_observe_future_future_completed();
+
+    void test_waitForFinished();
+    void test_restarter();
+    void test_restart_parent_delete();
 };

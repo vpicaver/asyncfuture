@@ -2005,4 +2005,114 @@ void Spec::test_completed() {
     }
 }
 
+void Spec::test_waitForFinished() {
+
+}
+
+void Spec::test_restarter() {
+    Restarter<int> restarter(QCoreApplication::instance());
+
+    QList<QFuture<int>> allFutures;
+    QAtomicInt count(0);
+
+    restarter.onFutureChanged([&allFutures, &restarter]() {
+        Q_ASSERT(QThread::currentThread() == QCoreApplication::instance()->thread());
+        allFutures.append(restarter.future());
+    });
+
+    for(int i = 0; i < 20; i++) {
+        auto run = [&count, i]() {
+            auto concurrentRun = [&count, i]() {
+                QThread::msleep(10);
+                count++;
+                return i;
+            };
+
+            auto future = QtConcurrent::run(concurrentRun);
+            return future;
+        };
+
+        restarter.restart(run);
+    }
+
+    for(int i = 0; i < allFutures.size(); i++) {
+        waitForFinished(allFutures.at(i));
+    }
+
+    // restarter future checks
+    QCOMPARE(restarter.future().isRunning(), false);
+    QCOMPARE(restarter.future().isCanceled(), false);
+    QCOMPARE(restarter.future().isFinished(), true);
+    QCOMPARE(restarter.future().result(), 19); // We restarted from 0 to 19
+
+    // allFutures checks
+    QCOMPARE(allFutures.isEmpty(), false);
+    QCOMPARE(allFutures.last().isRunning(), false);
+    QCOMPARE(allFutures.last().isCanceled(), false);
+    QCOMPARE(allFutures.last().isFinished(), true);
+    QCOMPARE(allFutures.last().result(), 19);
+
+    // final count checks
+    int finalCount = count;
+    QCOMPARE(finalCount <= 2, true);
+    QCOMPARE(finalCount >= 1, true);
+}
+
+void Spec::test_restart_parent_delete() {
+    class ParentObject : public QObject {
+    public:
+        ParentObject() {
+            values.resize(1000);
+            values.last() = 40;
+        }
+
+        int last() const {
+            return values.last();
+        }
+
+        void setLast(int value) {
+            values.last() = value;
+        }
+
+    private:
+        QVector<int> values;
+    };
+
+    auto contextObj = new ParentObject();
+    QAtomicInt count(0);
+
+    Restarter<int> restarter(contextObj);
+    QFuture<int> latestFuture;
+
+    restarter.onFutureChanged([&latestFuture, &restarter]() {
+        latestFuture = restarter.future();
+    });
+
+    for(int i = 0; i < 20; i++) {
+        auto run = [&count, i, contextObj]() {
+            contextObj->setLast(contextObj->last() + i);
+            int value = contextObj->last();
+            auto concurrentRun = [&count, value]() {
+                QThread::msleep(10);
+                count++;
+                return value;
+            };
+
+            auto future = QtConcurrent::run(concurrentRun);
+            return future;
+        };
+
+        restarter.restart(run);
+    }
+
+    delete contextObj;
+
+    while(latestFuture.isRunning()) {
+        waitForFinished(latestFuture);
+    }
+
+    QCOMPARE(latestFuture.isCanceled(), true);
+    QCOMPARE((count == 1 || count == 0), true); //Count 0, it might not even been started
+}
+
 

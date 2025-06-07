@@ -754,6 +754,85 @@ In the example code above, the future returned by `defer.future` is supposed to 
 
 In case it needs to track the status of a future object but it won’t complete automatically. It may use track() function
 
+Restarter<T> 
+---
+Restarter is a helper for managing asynchronous operations in Qt/Concurrent. It lets you “restart” a long-running task whenever inputs change, ensuring that only the most recent invocation actually runs to completion. Previous runs are cancelled cleanly before the next one begins.
+
+When to use
+
+Debouncing or reload-on-change
+If you have a UI element (e.g. a search box, filter slider, map viewport) that triggers an expensive asynchronous operation on every change, use Restarter to avoid piling up simultaneous tasks. Only the latest action will complete; in-flight tasks get cancelled.
+Auto-retry with updated parameters
+When your parameters change mid-flight, you want to cancel the current job and start a fresh one with new arguments, but only once the old job actually acknowledges cancellation.
+
+**How it works**
+
+1. First call to restart(...)
+  * Immediately runs the provided runFunction to produce a QFuture<T>.
+  * Calls your “future changed” callback so you can react to the new future.
+2. Subsequent calls while the future is running
+  * Saves the newest runFunction.
+  * Installs a single cancellation watcher (via AsyncFuture::observe) on the running future.
+  * Cancels the running future.
+3. When the running future is cancelled
+  * The watcher fires, and Restarter calls your latest runFunction to start the new task.
+  * Again notifies you via the “future changed” callback.
+4. Safety on context deletion
+  * Because the watcher is tied to a QObject* context, if that context is destroyed before cancellation completes, the watcher is cleaned up and you’ll get a cancelled future.
+
+**Quick Example**
+
+Imagine you have a search field and want to fire off a network request each time the text changes, but cancel any pending request as soon as the user types again:
+
+```
+// 1) Create a Restarter<int> (or whatever T your request returns)
+Restarter<ResponseData> restarter{ this };
+
+// 2) Hook up a callback so you get notified whenever a new future is created
+restarter.onFutureChanged([&](){
+  //Help watch current progress of the future that's running
+});
+
+// 3) Whenever the text changes, restart the search
+connect(searchLineEdit, &QLineEdit::textChanged, this,
+        [&](const QString& text){
+    restarter.restart([=](){
+        // This lambda runs on a worker thread
+        auto future = QtConcurrent::run([=](){
+            return performNetworkSearch(text);
+        });
+
+        return observe(future).subscribe([](){
+          //Handle the results of network search
+        }).future();
+
+    });
+});
+```
+* On the very first keystroke, a network request fires immediately.
+* If the user types again before the request completes, the old request is cancelled (assuming your network layer supports cancellation) and a new one starts only once the cancellation is acknowledged.
+* displayResults() sees only the latest completed response.
+
+
+waitForFinished()
+---
+Sometimes you need to block until a QFuture<T> completes, but you don’t want to spin your test harness or lose signal/slot delivery in unit tests. This helper uses a QFutureWatcher<T> and a minimal QEventLoop (with an optional timeout) to pump events needed for Qt’s testing framework while waiting.
+
+```
+void MyTest::testAsyncSum() {
+    auto future = QtConcurrent::run([](){
+        QThread::sleep(1);
+        return 123;
+    });
+
+    // Wait up to 2 seconds, processing events so QTest continues handling events
+    QVERIFY(waitForFinished(future, 2000));
+    QCOMPARE(future.result(), 123);
+}
+```
+
+
+
 Examples
 ========
 
