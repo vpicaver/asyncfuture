@@ -2177,3 +2177,26 @@ void Spec::test_restart_parent_delete() {
     QCOMPARE((count == 1 || count == 0), true); //Count 0, it might not even been started
 }
 
+void Spec::test_restarter_wait_deadlock() {
+    Restarter<int> restarter(QCoreApplication::instance());
+
+    // Immediately wait on the exposed future; previously this could block forever
+    auto outer = restarter.future();
+
+    waitForFinished(outer); // Should not deadlock
+    QCOMPARE(outer.isFinished(), true);
+    QCOMPARE(outer.isCanceled(), true);
+}
+
+void Spec::test_restarter_cancel_deadlock() {
+    Restarter<int> restarter(QCoreApplication::instance());
+
+    auto outer = restarter.future();
+    QVERIFY(!outer.isValid());
+
+    outer.cancel();
+    waitForFinished(outer); // Should not deadlock
+
+    QCOMPARE(outer.isFinished(), true);
+    QCOMPARE(outer.isCanceled(), true);
+}

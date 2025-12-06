@@ -1836,6 +1836,9 @@ public:
     Restarter(QObject* context) :
         context(context)
     {
+        //This prevents deadlock if future() is used and waiting for it before restart() is called
+        outerDeferred.cancel();
+
         if (context) {
             QObject::connect(context, &QObject::destroyed, context, [this]() {
                 // Context is gone, cancel any in-flight work and resolve outer deferred
