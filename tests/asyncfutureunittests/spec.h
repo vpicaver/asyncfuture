@@ -119,5 +119,6 @@ private slots:
 
     void test_waitForFinished();
     void test_restarter();
+    void test_restarter_waitForFinished_snapshot();
     void test_restart_parent_delete();
 };

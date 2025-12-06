@@ -1834,8 +1834,21 @@ template<typename T>
 class Restarter {
 public:
     Restarter(QObject* context) :
-        Context(context)
+        context(context)
     {
+        if (context) {
+            QObject::connect(context, &QObject::destroyed, context, [this]() {
+                // Context is gone, cancel any in-flight work and resolve outer deferred
+                isCancelling = false;
+                if (activeInner.isRunning()) {
+                    activeInner.cancel();
+                }
+                if (!outerDeferred.future().isFinished()) {
+                    outerDeferred.cancel();
+                }
+                pendingStart = nullptr;
+            });
+        }
 
     }
 
@@ -1845,27 +1858,55 @@ public:
     void restart(std::function<QFuture<T> ()> runFunction) {
         Q_ASSERT(runFunction);
 
-        if(!Future.isRunning()) {
-            setFuture(runFunction());
-        } else {
-            //Update the run function so we use the most update one
-            this->runFunction = runFunction;
+        currentRunFunction = std::move(runFunction);
+        generation++;
 
+        auto startRun = [this, gen = generation]() {
+            QFuture<T> inner = currentRunFunction();
+
+            AsyncFuture::observe(inner).context(context,
+                                                [this, gen, inner]() {
+                                                    deliver(gen, inner);
+                                                },
+                                                [this, gen, inner]() {
+                                                    deliver(gen, inner);
+                                                });
+
+            // keep track of the in-flight inner future
+            activeInner = inner;
+        };
+
+        if(!activeInner.isRunning()) {
+            outerDeferred = AsyncFuture::deferred<T>();
+            if(changedCallback) {
+                changedCallback();
+            }
+            startRun();
+        } else {
             //Only setup the watch and cancel the future once
-            if(!isCanceled) {
+            if(!isCancelling) {
+                isCancelling = true;
+                pendingStart = startRun;
+
                 //Watch for when the Future is cancelled
-                AsyncFuture::observe(Future).context(Context,
-                                                     [](){}, //Do nothing on finished
-                                                     [this]()
-                                                     {
-                                                         //Recursive call
-                                                         Q_ASSERT(Future.isCanceled());
-                                                         setFuture(this->runFunction());
-                                                     });
+                AsyncFuture::observe(activeInner).context(context,
+                                                         [](){}, //Do nothing on finished
+                                                         [this]()
+                                                         {
+                                                             //Recursive call
+                                                             Q_ASSERT(activeInner.isCanceled());
+                                                             if(pendingStart) {
+                                                                 auto start = pendingStart;
+                                                                 pendingStart = nullptr;
+                                                                 start();
+                                                             }
+                                                         });
 
                 //Cancel
-                isCanceled = true;
-                Future.cancel();
+                activeInner.cancel();
+            } else {
+                // Already cancelling; just remember the latest start
+                pendingStart = startRun;
             }
         }
     }
@@ -1875,19 +1916,39 @@ public:
     }
 
     QFuture<T> future() const {
-        return Future;
+        return outerDeferred.future();
     }
 
 private:
-    std::function<QFuture<T> ()> runFunction;
+    std::function<QFuture<T> ()> currentRunFunction;
     std::function<void ()> changedCallback;
-    QFuture<T> Future;
-    QObject* Context;
-    bool isCanceled = false;
+    std::function<void()> pendingStart;
+    QFuture<T> activeInner;
+    Deferred<T> outerDeferred;
+    QObject* context;
+    int generation = 0;
+    bool isCancelling = false;
 
-    void setFuture(QFuture<T> future) {
-        isCanceled = false;
-        Future = future;
+    void deliver(int gen, const QFuture<T>& future) {
+        isCancelling = false;
+        activeInner = future;
+
+        // Ignore stale completions
+        if(gen != generation) {
+            return;
+        }
+
+        if(future.isCanceled()) {
+            qDebug() << "Future cancelled";
+            outerDeferred.cancel();
+        } else {
+            if constexpr (std::is_same_v<T, void>) {
+                outerDeferred.complete();
+            } else {
+                outerDeferred.complete(future.result());
+            }
+        }
+
         if(changedCallback) {
             changedCallback();
         }

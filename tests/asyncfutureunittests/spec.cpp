@@ -2035,6 +2035,8 @@ void Spec::test_restarter() {
         restarter.restart(run);
     }
 
+    QVERIFY2(allFutures.size() > 0, "There should be at least on future change");
+
     for(int i = 0; i < allFutures.size(); i++) {
         waitForFinished(allFutures.at(i));
     }
@@ -2056,6 +2058,66 @@ void Spec::test_restarter() {
     int finalCount = count;
     QCOMPARE(finalCount <= 2, true);
     QCOMPARE(finalCount >= 1, true);
+}
+
+void Spec::test_restarter_waitForFinished_snapshot() {
+    Restarter<int> restarter(QCoreApplication::instance());
+
+    QAtomicInt count(0);
+
+    auto longRunning = [&count]() {
+        return QtConcurrent::run([&count]() {
+            // qDebug() << "Run 1";
+            QThread::msleep(200);
+            count++;
+            return 1;
+        });
+    };
+
+
+    // Start the long running future
+    restarter.restart(longRunning);
+    QThread::msleep(20); // ensure the first future is in-flight
+
+    for(int i = 0; i < 100; i++) {
+        auto replacement = [&count, i]() {
+            return QtConcurrent::run([&count, i]() {
+                // qDebug() << "Run=" << i;
+                QThread::msleep(100);
+                count++;
+                return i;
+            });
+        };
+
+        QThread::msleep(1); // ensure the first future is in-flight
+
+        // Request a restart while the first future is running
+        restarter.restart(replacement);
+    }
+
+    // Snapshot the current future handle immediately after restart.
+    // This will still refer to the canceled old future until the internal
+    // observe() callback swaps in the replacement.
+    auto snapshot = restarter.future();
+
+    // QElapsedTimer timer;
+    // timer.start();
+    waitForFinished(snapshot); // blocks on the canceled/old future
+    // const qint64 elapsed = timer.elapsed();
+
+    // The latest future should still be running because we only waited on the
+    // canceled snapshot, not the replacement that Restarter will install.
+    // auto latest = restarter.future();
+
+    // qDebug() << "Elapsed:" << elapsed;
+
+    // QVERIFY2(elapsed < 100, "Waiting on the snapshot returned before the replacement future could finish");
+    QVERIFY2(!snapshot.isRunning(), "The latest future should still be running after waiting on the snapshot");
+
+    // qDebug() << "Count:" << count;
+
+    // waitForFinished(latest);
+    QCOMPARE(snapshot.result(), 99);
 }
 
 void Spec::test_restart_parent_delete() {
@@ -2114,5 +2176,4 @@ void Spec::test_restart_parent_delete() {
     QCOMPARE(latestFuture.isCanceled(), true);
     QCOMPARE((count == 1 || count == 0), true); //Count 0, it might not even been started
 }
-
 
