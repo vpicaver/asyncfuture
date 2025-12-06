@@ -1876,6 +1876,8 @@ public:
         auto startRun = [this, gen = generation]() {
             QFuture<T> inner = currentRunFunction();
 
+            outerDeferred.track(inner);
+
             AsyncFuture::observe(inner).context(context,
                                                 [this, gen, inner]() {
                                                     deliver(gen, inner);

@@ -2066,6 +2066,110 @@ void Spec::test_restarter() {
     QCOMPARE(finalCount >= 1, true);
 }
 
+void Spec::test_restarter_propagates_progress() {
+    Restarter<int> restarter(QCoreApplication::instance());
+
+    const int taskCount = 5;
+    QList<int> values;
+    for (int i = 0; i < taskCount; ++i) {
+        values << i;
+    }
+
+    restarter.restart([values]() {
+        auto future = QtConcurrent::mapped(values, [](int value) {
+            QThread::msleep(20);
+            return value;
+        });
+        return future;
+    });
+
+    auto outer = restarter.future();
+
+    QList<int> progressValues;
+    QList<QPair<int, int>> progressRanges;
+    QFutureWatcher<int> watcher;
+    connect(&watcher, &QFutureWatcher<int>::progressValueChanged, [&](int value) {
+        progressValues << value;
+    });
+    connect(&watcher, &QFutureWatcher<int>::progressRangeChanged, [&](int min, int max) {
+        progressRanges << qMakePair(min, max);
+    });
+    watcher.setFuture(outer);
+
+    QVERIFY(waitUntil(outer, 2000));
+
+    QCOMPARE(outer.isCanceled(), false);
+    QCOMPARE(outer.progressMaximum(), taskCount);
+    QCOMPARE(outer.progressValue(), taskCount);
+    QVERIFY(!progressRanges.isEmpty());
+    QCOMPARE(progressRanges.last().first, 0);
+    QCOMPARE(progressRanges.last().second, taskCount);
+    QVERIFY(progressValues.size() >= 2); // should change over time, not just once
+    QCOMPARE(progressValues.last(), taskCount);
+    for (int i = 1; i < progressValues.size(); ++i) {
+        QVERIFY(progressValues[i] >= progressValues[i - 1]);
+    }
+}
+
+void Spec::test_restarter_progress_across_restarts() {
+    Restarter<int> restarter(QCoreApplication::instance());
+
+    auto startMapped = [&](int count) {
+        restarter.restart([count]() {
+            QList<int> items;
+            for (int i = 0; i < count; ++i) {
+                items << i;
+            }
+            auto future = QtConcurrent::mapped(items, [](int value) {
+                QThread::msleep(25);
+                return value;
+            });
+            return future;
+        });
+    };
+
+    startMapped(3);
+    auto outer = restarter.future();
+
+    QList<int> progressValues;
+    QList<QPair<int, int>> rangeChanges;
+    QFutureWatcher<int> watcher;
+    connect(&watcher, &QFutureWatcher<int>::progressValueChanged, [&](int value) {
+        progressValues << value;
+    });
+    connect(&watcher, &QFutureWatcher<int>::progressRangeChanged, [&](int min, int max) {
+        rangeChanges << qMakePair(min, max);
+    });
+    watcher.setFuture(outer);
+
+    QThread::msleep(10);
+    startMapped(4);
+    QThread::msleep(10);
+    startMapped(2); // final run
+
+    QVERIFY(waitUntil(outer, 3000));
+
+    QCOMPARE(outer.isCanceled(), false);
+    QCOMPARE(outer.progressMaximum(), 2);
+    QCOMPARE(outer.progressValue(), 2);
+
+    QVERIFY(!rangeChanges.isEmpty());
+    QCOMPARE(rangeChanges.last().first, 0);
+    QCOMPARE(rangeChanges.last().second, 2);
+    QVERIFY(rangeChanges.size() >= 2); // at least one change after the first run
+
+    QVERIFY(!progressValues.isEmpty());
+    QCOMPARE(progressValues.last(), 2);
+    bool sawIntermediate = false;
+    for (int i = 0; i + 1 < progressValues.size(); ++i) {
+        if (progressValues[i] < progressValues.last()) {
+            sawIntermediate = true;
+            break;
+        }
+    }
+    QVERIFY(sawIntermediate); // progress should have advanced over time
+}
+
 void Spec::test_restarter_destroy_before_context() {
     auto contextObj = new QObject();
     auto restarter = new Restarter<int>(contextObj);
