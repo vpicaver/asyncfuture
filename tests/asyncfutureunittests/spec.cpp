@@ -2013,6 +2013,7 @@ void Spec::test_restarter() {
     Restarter<int> restarter(QCoreApplication::instance());
 
     QList<QFuture<int>> allFutures;
+    QList<QFuture<int>> innerFutures;
     QAtomicInt count(0);
 
     restarter.onFutureChanged([&allFutures, &restarter]() {
@@ -2021,7 +2022,7 @@ void Spec::test_restarter() {
     });
 
     for(int i = 0; i < 20; i++) {
-        auto run = [&count, i]() {
+        auto run = [&count, &innerFutures, i]() {
             auto concurrentRun = [&count, i]() {
                 QThread::msleep(10);
                 count++;
@@ -2029,6 +2030,7 @@ void Spec::test_restarter() {
             };
 
             auto future = QtConcurrent::run(concurrentRun);
+            innerFutures.append(future);
             return future;
         };
 
@@ -2054,6 +2056,10 @@ void Spec::test_restarter() {
     QCOMPARE(allFutures.last().isFinished(), true);
     QCOMPARE(allFutures.last().result(), 19);
 
+    for (const auto &inner : innerFutures) {
+        waitForFinished(inner);
+    }
+
     // final count checks
     int finalCount = count;
     QCOMPARE(finalCount <= 2, true);
@@ -2063,15 +2069,18 @@ void Spec::test_restarter() {
 void Spec::test_restarter_waitForFinished_snapshot() {
     Restarter<int> restarter(QCoreApplication::instance());
 
+    QList<QFuture<int>> innerFutures;
     QAtomicInt count(0);
 
-    auto longRunning = [&count]() {
-        return QtConcurrent::run([&count]() {
+    auto longRunning = [&count, &innerFutures]() {
+        auto future = QtConcurrent::run([&count]() {
             // qDebug() << "Run 1";
             QThread::msleep(200);
             count++;
             return 1;
         });
+        innerFutures.append(future);
+        return future;
     };
 
 
@@ -2080,13 +2089,15 @@ void Spec::test_restarter_waitForFinished_snapshot() {
     QThread::msleep(20); // ensure the first future is in-flight
 
     for(int i = 0; i < 100; i++) {
-        auto replacement = [&count, i]() {
-            return QtConcurrent::run([&count, i]() {
+        auto replacement = [&count, &innerFutures, i]() {
+            auto future = QtConcurrent::run([&count, i]() {
                 // qDebug() << "Run=" << i;
                 QThread::msleep(100);
                 count++;
                 return i;
             });
+            innerFutures.append(future);
+            return future;
         };
 
         QThread::msleep(1); // ensure the first future is in-flight
@@ -2118,6 +2129,10 @@ void Spec::test_restarter_waitForFinished_snapshot() {
 
     // waitForFinished(latest);
     QCOMPARE(snapshot.result(), 99);
+
+    for (const auto &inner : innerFutures) {
+        waitForFinished(inner);
+    }
 }
 
 void Spec::test_restart_parent_delete() {
@@ -2141,6 +2156,7 @@ void Spec::test_restart_parent_delete() {
     };
 
     auto contextObj = new ParentObject();
+    QList<QFuture<int>> innerFutures;
     QAtomicInt count(0);
 
     Restarter<int> restarter(contextObj);
@@ -2151,7 +2167,7 @@ void Spec::test_restart_parent_delete() {
     });
 
     for(int i = 0; i < 20; i++) {
-        auto run = [&count, i, contextObj]() {
+        auto run = [&count, i, contextObj, &innerFutures]() {
             contextObj->setLast(contextObj->last() + i);
             int value = contextObj->last();
             auto concurrentRun = [&count, value]() {
@@ -2161,6 +2177,7 @@ void Spec::test_restart_parent_delete() {
             };
 
             auto future = QtConcurrent::run(concurrentRun);
+            innerFutures.append(future);
             return future;
         };
 
@@ -2175,6 +2192,10 @@ void Spec::test_restart_parent_delete() {
 
     QCOMPARE(latestFuture.isCanceled(), true);
     QCOMPARE((count == 1 || count == 0), true); //Count 0, it might not even been started
+
+    for (const auto &inner : innerFutures) {
+        waitForFinished(inner);
+    }
 }
 
 void Spec::test_restarter_wait_deadlock() {
