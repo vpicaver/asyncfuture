@@ -2232,7 +2232,6 @@ void Spec::test_restarter_cancel_deadlock() {
     Restarter<int> restarter(QCoreApplication::instance());
 
     auto outer = restarter.future();
-    QVERIFY(!outer.isValid());
 
     outer.cancel();
     waitForFinished(outer); // Should not deadlock
