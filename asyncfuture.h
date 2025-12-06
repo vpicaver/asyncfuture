@@ -1840,7 +1840,7 @@ public:
         outerDeferred.cancel();
 
         if (context) {
-            QObject::connect(context, &QObject::destroyed, context, [this]() {
+            onDestoryContext = QObject::connect(context, &QObject::destroyed, context, [this]() {
                 // Context is gone, cancel any in-flight work and resolve outer deferred
                 isCancelling = false;
                 if (activeInner.isRunning()) {
@@ -1852,11 +1852,20 @@ public:
                 pendingStart = nullptr;
             });
         }
-
+    }
+    ~Restarter() {
+        QObject::disconnect(onDestoryContext);
+        if (activeInner.isRunning()) {
+            activeInner.cancel();
+        }
+        if (!outerDeferred.future().isFinished()) {
+            outerDeferred.cancel();
+        }
     }
 
     Restarter(const Restarter& other) = delete;
     Restarter& operator=(const Restarter& other) = delete;
+
 
     void restart(std::function<QFuture<T> ()> runFunction) {
         Q_ASSERT(runFunction);
@@ -1929,6 +1938,7 @@ private:
     QFuture<T> activeInner;
     Deferred<T> outerDeferred;
     QObject* context;
+    QMetaObject::Connection onDestoryContext;
     int generation = 0;
     bool isCancelling = false;
 

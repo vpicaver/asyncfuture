@@ -2066,6 +2066,25 @@ void Spec::test_restarter() {
     QCOMPARE(finalCount >= 1, true);
 }
 
+void Spec::test_restarter_destroy_before_context() {
+    auto contextObj = new QObject();
+    auto restarter = new Restarter<int>(contextObj);
+
+    // Trigger a restart to ensure any internal connections to the context are set up.
+    restarter->restart([]() {
+        return QtConcurrent::run([]() {
+            return 1;
+        });
+    });
+
+    delete restarter;
+
+    // Deleting the context after the Restarter should not invoke callbacks on a freed Restarter.
+    delete contextObj;
+
+    QVERIFY(true); // If we get here without a crash, the scenario is handled.
+}
+
 void Spec::test_restarter_waitForFinished_snapshot() {
     Restarter<int> restarter(QCoreApplication::instance());
 

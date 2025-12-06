@@ -120,6 +120,7 @@ private slots:
     void test_waitForFinished();
     void test_restarter();
     void test_restarter_waitForFinished_snapshot();
+    void test_restarter_destroy_before_context();
     void test_restart_parent_delete();
     void test_restarter_wait_deadlock();
     void test_restarter_cancel_deadlock();
