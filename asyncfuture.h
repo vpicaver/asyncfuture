@@ -1309,7 +1309,7 @@ public:
         m_future = future;
     }
 
-    QFuture<T> future() const {
+    [[nodiscard]] QFuture<T> future() const {
         return m_future;
     }
 
