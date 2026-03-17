@@ -126,4 +126,7 @@ private slots:
     void test_restarter_cancel_deadlock();
     void test_restarter_propagates_progress();
     void test_restarter_progress_across_restarts();
+    void test_restarter_queued_rapid_fire();
+    void test_restarter_queued_dangling_this();
+    void test_restarter_null_context();
 };

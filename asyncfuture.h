@@ -1843,6 +1843,7 @@ public:
             onDestoryContext = QObject::connect(context, &QObject::destroyed, context, [this]() {
                 // Context is gone, cancel any in-flight work and resolve outer deferred
                 isCancelling = false;
+                isQueuedStart = false;
                 if (activeInner.isRunning()) {
                     activeInner.cancel();
                 }
@@ -1854,6 +1855,7 @@ public:
         }
     }
     ~Restarter() {
+        *m_alive = false;
         QObject::disconnect(onDestoryContext);
         if (activeInner.isRunning()) {
             activeInner.cancel();
@@ -1873,40 +1875,46 @@ public:
         currentRunFunction = std::move(runFunction);
         generation++;
 
-        auto startRun = [this, gen = generation]() {
-            QFuture<T> inner = currentRunFunction();
-
-            outerDeferred.track(inner);
-
-            AsyncFuture::observe(inner).context(context,
-                                                [this, gen, inner]() {
-                                                    deliver(gen, inner);
-                                                },
-                                                [this, gen, inner]() {
-                                                    deliver(gen, inner);
-                                                });
-
-            // keep track of the in-flight inner future
-            activeInner = inner;
-        };
-
         if(!activeInner.isRunning()) {
-            outerDeferred = AsyncFuture::deferred<T>();
-            if(changedCallback) {
-                changedCallback();
+            // Queue the first start of a burst on the event loop so that rapid
+            // synchronous restart() calls coalesce into a single run.
+            if(!isQueuedStart) {
+                isQueuedStart = true;
+                outerDeferred = AsyncFuture::deferred<T>();
+                if(changedCallback) {
+                    changedCallback();
+                }
+                auto alive = m_alive;
+                if (context) {
+                    QMetaObject::invokeMethod(context, [this, alive]() {
+                        if (!*alive) {
+                            return;
+                        }
+                        isQueuedStart = false;
+                        startRun();
+                    }, Qt::QueuedConnection);
+                } else {
+                    isQueuedStart = false;
+                    startRun();
+                }
             }
-            startRun();
+            // else: already queued for this burst; currentRunFunction is updated
+            // above and startRun() will use it when the queued call fires.
         } else {
             //Only setup the watch and cancel the future once
             if(!isCancelling) {
                 isCancelling = true;
-                pendingStart = startRun;
+                pendingStart = [this]() { startRun(); };
 
                 //Watch for when the Future is cancelled
+                auto alive = m_alive;
                 AsyncFuture::observe(activeInner).context(context,
                                                          [](){}, //Do nothing on finished
-                                                         [this]()
+                                                         [this, alive]()
                                                          {
+                                                             if (!*alive) {
+                                                                 return;
+                                                             }
                                                              //Recursive call
                                                              Q_ASSERT(activeInner.isCanceled());
                                                              if(pendingStart) {
@@ -1918,10 +1926,9 @@ public:
 
                 //Cancel
                 activeInner.cancel();
-            } else {
-                // Already cancelling; just remember the latest start
-                pendingStart = startRun;
             }
+            // else: already cancelling; currentRunFunction is updated above and
+            // startRun() will use it when pendingStart fires after cancellation.
         }
     }
 
@@ -1934,6 +1941,7 @@ public:
     }
 
 private:
+    std::shared_ptr<bool> m_alive = std::make_shared<bool>(true);
     std::function<QFuture<T> ()> currentRunFunction;
     std::function<void ()> changedCallback;
     std::function<void()> pendingStart;
@@ -1943,6 +1951,26 @@ private:
     QMetaObject::Connection onDestoryContext;
     int generation = 0;
     bool isCancelling = false;
+    bool isQueuedStart = false;
+
+    void startRun() {
+        QFuture<T> inner = currentRunFunction();
+
+        outerDeferred.track(inner);
+
+        // observe() requires a non-null context; fall back to the application
+        // when no context was provided.
+        QObject* observeContext = context ? context : QCoreApplication::instance();
+        AsyncFuture::observe(inner).context(observeContext,
+                                            [this, gen = generation, inner]() {
+                                                deliver(gen, inner);
+                                            },
+                                            [this, gen = generation, inner]() {
+                                                deliver(gen, inner);
+                                            });
+
+        activeInner = inner;
+    }
 
     void deliver(int gen, const QFuture<T>& future) {
         isCancelling = false;

@@ -2142,6 +2142,10 @@ void Spec::test_restarter_progress_across_restarts() {
     });
     watcher.setFuture(outer);
 
+    // Let the event loop yield so the queued start fires and the first run is
+    // actually in-flight before subsequent restarts arrive.
+    QCoreApplication::processEvents();
+
     QThread::msleep(10);
     startMapped(4);
     QThread::msleep(10);
@@ -2342,4 +2346,95 @@ void Spec::test_restarter_cancel_deadlock() {
 
     QCOMPARE(outer.isFinished(), true);
     QCOMPARE(outer.isCanceled(), true);
+}
+
+void Spec::test_restarter_queued_rapid_fire() {
+    // Verifies the desired queued-restarter behaviour (issue #319):
+    // When N restarts are fired synchronously before the event loop yields and
+    // nothing is already running, only the last restart should actually execute.
+    // This test is expected to FAIL against the current (non-queued) Restarter
+    // and PASS once Restarter defers its first startRun() to the event loop.
+
+    Restarter<int> restarter(QCoreApplication::instance());
+
+    QAtomicInt runCount(0);
+    const int restartCount = 20;
+
+    for (int i = 0; i < restartCount; i++) {
+        restarter.restart([&runCount, i]() {
+            runCount.fetchAndAddOrdered(1);
+            return QtConcurrent::run([i]() {
+                return i;
+            });
+        });
+    }
+
+    // Nothing should have run yet — all restarts were fired synchronously before
+    // the event loop had a chance to yield.
+    QCOMPARE(runCount.loadRelaxed(), 0);
+
+    waitForFinished(restarter.future());
+
+    // Exactly one run executed (the last one), producing result == restartCount - 1.
+    QCOMPARE(runCount.loadRelaxed(), 1);
+    QCOMPARE(restarter.future().result(), restartCount - 1);
+}
+
+void Spec::test_restarter_queued_dangling_this() {
+    // Regression test for the dangling-this bug in the queued lambda:
+    // When a Restarter is destroyed while its context is still alive and a
+    // queued start is pending, the lambda must not access the freed Restarter.
+    //
+    // Before the fix this triggers use-after-free — caught by ASAN in Debug
+    // builds, and detectable at runtime because startCount is incremented via
+    // the freed currentRunFunction.
+    //
+    // After the fix the alive-guard causes the lambda to return early, so
+    // startCount remains 0.
+
+    QObject context;
+    int startCount = 0;
+
+    {
+        Restarter<int> restarter(&context);
+        restarter.restart([&startCount]() {
+            startCount++;
+            return QtConcurrent::run([]() {
+                return 1;
+            });
+        });
+        // restarter is destroyed here with the queued start still pending.
+        // context remains alive so Qt will not drop the queued invocation.
+    }
+
+    QCoreApplication::processEvents();
+
+    // startCount must be 0: startRun() must not have been called on the
+    // destroyed Restarter.
+    QCOMPARE(startCount, 0);
+}
+
+void Spec::test_restarter_null_context() {
+    // A Restarter constructed with a null context must still run its restart
+    // function and complete normally.
+    //
+    // Before the fix, restart() calls
+    // QMetaObject::invokeMethod(nullptr, ..., Qt::QueuedConnection), whose
+    // behaviour with a null receiver is undefined — the run function may never
+    // execute, leaving the future permanently pending (waitForFinished hangs).
+    //
+    // After the fix the null-context path falls back to direct startRun().
+
+    Restarter<int> restarter(nullptr);
+
+    restarter.restart([]() {
+        return QtConcurrent::run([]() {
+            return 42;
+        });
+    });
+
+    waitForFinished(restarter.future());
+
+    QCOMPARE(restarter.future().isCanceled(), false);
+    QCOMPARE(restarter.future().result(), 42);
 }
