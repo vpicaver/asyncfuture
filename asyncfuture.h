@@ -1827,6 +1827,10 @@ bool waitForFinished(QFuture<T> future, int timeout = -1) {
 
     loop.exec();
 
+    // Drain any events posted during future completion (e.g. context() callbacks
+    // queued via Qt::QueuedConnection) so callers see a fully settled state.
+    QCoreApplication::processEvents();
+
     return watcher.isFinished();
 }
 
