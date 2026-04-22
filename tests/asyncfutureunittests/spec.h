@@ -132,4 +132,9 @@ private slots:
     void test_restarter_qpromise_cancel_inner_loop();
     void test_subscribe_qpromise_cancel_inner_loop();
     void test_context_qpromise_cancel_inner_loop();
+
+    void test_context_qpromise_progress();
+    void test_restarter_qpromise_progress();
+    void test_restarter_qpromise_progress_across_restarts();
+    void test_context_chain_qpromise_progress_accumulates();
 };

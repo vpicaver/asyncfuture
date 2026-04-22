@@ -103,6 +103,7 @@ target_link_libraries(asyncfutureunittests
     Qt::Qml
     qtshell
     testrunner
+    asyncfuture
 )
 
 # Additional includes

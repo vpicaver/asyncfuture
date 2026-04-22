@@ -2580,3 +2580,180 @@ void Spec::test_context_qpromise_cancel_inner_loop() {
     QVERIFY(waitUntil([&]() { return onCancelledCalls.loadAcquire() == 1; }, 5000));
     QCOMPARE(onCompletedCalls.loadRelaxed(), 0);
 }
+
+static QFuture<int> runQPromiseProgressWorker(int steps, int perStepSleepUs = 5000) {
+    return QtConcurrent::run([steps, perStepSleepUs](QPromise<int>& promise) {
+        promise.setProgressRange(0, steps);
+        for (int i = 0; i <= steps; ++i) {
+            if (promise.isCanceled()) return;
+            promise.setProgressValue(i);
+            QThread::usleep(perStepSleepUs);
+        }
+        promise.addResult(steps);
+    });
+}
+
+void Spec::test_context_qpromise_progress() {
+    const int steps = 10;
+
+    auto work = runQPromiseProgressWorker(steps);
+
+    QObject ctx;
+    auto chain = observe(work).context(&ctx, [](int r) {
+        return r;
+    }).future();
+
+    // Private::execute() seeds the chain's range synchronously from the source
+    // future before .future() returns, so progressRangeChanged may fire before
+    // a test-level watcher can attach — we verify the final range via
+    // progressMaximum() rather than a captured signal. Progress values arrive
+    // through queued signals as the worker runs, so those we can capture.
+    ProgressCapture<int> progress(chain);
+
+    QVERIFY(waitUntil(chain, 5000));
+
+    QCOMPARE(chain.isCanceled(), false);
+    QCOMPARE(chain.progressMaximum(), steps);
+    QCOMPARE(chain.progressValue(), steps);
+
+    QVERIFY2(progress.values().size() >= 2,
+             "expected at least one intermediate progressValueChanged");
+    QCOMPARE(progress.values().last(), steps);
+    for (int i = 1; i < progress.values().size(); ++i) {
+        QVERIFY(progress.values()[i] >= progress.values()[i - 1]);
+    }
+}
+
+void Spec::test_restarter_qpromise_progress() {
+    Restarter<int> restarter(QCoreApplication::instance());
+
+    const int steps = 10;
+    restarter.restart([steps]() {
+        return runQPromiseProgressWorker(steps);
+    });
+
+    auto outer = restarter.future();
+    ProgressCapture<int> progress(outer);
+
+    QVERIFY(waitUntil(outer, 5000));
+
+    QCOMPARE(outer.isCanceled(), false);
+    QCOMPARE(outer.progressMaximum(), steps);
+    QCOMPARE(outer.progressValue(), steps);
+
+    QVERIFY(!progress.ranges().isEmpty());
+    QCOMPARE(progress.ranges().last().first, 0);
+    QCOMPARE(progress.ranges().last().second, steps);
+
+    QVERIFY2(progress.values().size() >= 2,
+             "Restarter should emit at least one intermediate progressValueChanged");
+    QCOMPARE(progress.values().last(), steps);
+    for (int i = 1; i < progress.values().size(); ++i) {
+        QVERIFY(progress.values()[i] >= progress.values()[i - 1]);
+    }
+}
+
+void Spec::test_restarter_qpromise_progress_across_restarts() {
+    Restarter<int> restarter(QCoreApplication::instance());
+
+    QSemaphore letFirstFinish;
+    QAtomicInt firstStarted(0);
+
+    const int firstSteps = 10;
+    const int secondSteps = 3;
+
+    // Block the first worker mid-loop so the main thread has time to pump
+    // progressValueChanged signals before the restart cancels it.
+    restarter.restart([&]() -> QFuture<int> {
+        return QtConcurrent::run([&](QPromise<int>& promise) {
+            firstStarted.storeRelease(1);
+            promise.setProgressRange(0, firstSteps);
+            for (int i = 0; i <= firstSteps; ++i) {
+                if (promise.isCanceled()) return;
+                promise.setProgressValue(i);
+                QThread::usleep(5000);
+                if (i == 3) {
+                    while (!promise.isCanceled() &&
+                           !letFirstFinish.tryAcquire(1, 10)) {
+                    }
+                    if (promise.isCanceled()) return;
+                }
+            }
+            promise.addResult(firstSteps);
+        });
+    });
+
+    auto outer = restarter.future();
+    ProgressCapture<int> progress(outer);
+
+    // Pump the event loop until the first worker is both running and has
+    // emitted progress — required before we can meaningfully assert that a
+    // restart preserved the outer future while swapping progress sources.
+    QVERIFY(waitUntil([&]() { return firstStarted.loadAcquire() == 1; }, 5000));
+    QVERIFY(waitUntil([&]() { return !progress.values().isEmpty(); }, 5000));
+
+    const int valuesBeforeRestart = progress.values().size();
+    const int rangesBeforeRestart = progress.ranges().size();
+
+    restarter.restart([secondSteps]() -> QFuture<int> {
+        return runQPromiseProgressWorker(secondSteps);
+    });
+
+    letFirstFinish.release(1);
+
+    QVERIFY(waitUntil(outer, 5000));
+
+    QCOMPARE(outer.isCanceled(), false);
+    QCOMPARE(outer.progressMaximum(), secondSteps);
+    QCOMPARE(outer.progressValue(), secondSteps);
+
+    QVERIFY2(valuesBeforeRestart >= 1,
+             "first worker should have emitted progress before restart");
+    QVERIFY2(rangesBeforeRestart >= 1,
+             "first worker should have emitted a range change before restart");
+
+    QVERIFY(!progress.ranges().isEmpty());
+    QCOMPARE(progress.ranges().last().first, 0);
+    QCOMPARE(progress.ranges().last().second, secondSteps);
+
+    QVERIFY(!progress.values().isEmpty());
+    QCOMPARE(progress.values().last(), secondSteps);
+}
+
+void Spec::test_context_chain_qpromise_progress_accumulates() {
+    const int outerSteps = 10;
+    const int innerSteps = 20;
+
+    auto outerWork = runQPromiseProgressWorker(outerSteps);
+
+    QObject ctx;
+    auto chain = observe(outerWork).context(&ctx, [innerSteps](int) -> QFuture<int> {
+        return runQPromiseProgressWorker(innerSteps);
+    }).future();
+
+    ProgressCapture<int> progress(chain);
+
+    QVERIFY(waitUntil(chain, 5000));
+
+    QCOMPARE(chain.isCanceled(), false);
+    // DeferredFuture::updateProgressRanges sums parentProgress.range() +
+    // watchProgress.range(), so chained progress maxima add up.
+    QCOMPARE(chain.progressMaximum(), outerSteps + innerSteps);
+    QCOMPARE(chain.progressValue(), outerSteps + innerSteps);
+
+    QVERIFY(!progress.ranges().isEmpty());
+    QCOMPARE(progress.ranges().last().second, outerSteps + innerSteps);
+
+    // Chained Progress guarantee (README): progressValueChanged is monotonic
+    // non-decreasing across the entire chain.
+    QVERIFY(!progress.values().isEmpty());
+    QCOMPARE(progress.values().last(), outerSteps + innerSteps);
+    for (int i = 1; i < progress.values().size(); ++i) {
+        QVERIFY2(progress.values()[i] >= progress.values()[i - 1],
+                 "progressValueChanged must not decrease across the chain");
+    }
+    // Size >= 3 ensures we see reports from both stages — a single stage alone
+    // can't produce that many updates with 10 steps.
+    QVERIFY2(progress.values().size() >= 3,
+             "expected progress reports from both outer and inner stages");
+}

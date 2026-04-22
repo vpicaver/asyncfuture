@@ -4,6 +4,9 @@
 #include <functional>
 #include <Automator>
 #include <QFuture>
+#include <QFutureWatcher>
+#include <QList>
+#include <QPair>
 #include <QtConcurrent>
 #include <QTime>
 #include <asyncfuture.h>
@@ -89,6 +92,28 @@ namespace Test {
 
         loop.exec();
     }
+
+    // Captures progressValueChanged / progressRangeChanged into lists for later
+    // assertions. Lifetime must outlive the observed future.
+    template <typename T>
+    class ProgressCapture {
+    public:
+        explicit ProgressCapture(QFuture<T> future) {
+            QObject::connect(&m_watcher, &QFutureWatcher<T>::progressValueChanged,
+                             [this](int value) { m_values << value; });
+            QObject::connect(&m_watcher, &QFutureWatcher<T>::progressRangeChanged,
+                             [this](int min, int max) { m_ranges << qMakePair(min, max); });
+            m_watcher.setFuture(future);
+        }
+
+        const QList<int>& values() const { return m_values; }
+        const QList<QPair<int, int>>& ranges() const { return m_ranges; }
+
+    private:
+        QFutureWatcher<T> m_watcher;
+        QList<int> m_values;
+        QList<QPair<int, int>> m_ranges;
+    };
 
     class Counter {
     public:
