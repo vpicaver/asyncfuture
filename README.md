@@ -153,7 +153,7 @@ QFuture<QImage> readImage(const QString& file) {
         return image;
     };
 
-    QFuture<QImage> reading = QtConcurrent::run(readImageWorker));
+    QFuture<QImage> reading = QtConcurrent::run(readImageWorker);
     return observe(reading).subscribe(updateCache).future();   
 }
 
@@ -242,7 +242,7 @@ AsyncFuture::observe(object, SIGNAL(signal))
 This function creates an `Observable<QVariant>` object which contains a future to represent the result of the signal. You could obtain the future by the future() method. And observe the result by subscribe() / context() methods. The result of the future is equal to the first parameter of the signal.
 
 ```c++
-QFuture<QVariant> future = observe(timer, SIGNAL(timeout()).future();
+QFuture<QVariant> future = observe(timer, SIGNAL(timeout())).future();
 ```
 
 See [Observable`<T>`](#observablet)
@@ -267,12 +267,12 @@ observe(future).subscribe([](bool toggled) {
 });
 ```
 
-AsyncFuture::observe(QFuture&lt;QFuture&lt;T&gt;T&gt; future)
+AsyncFuture::observe(QFuture&lt;QFuture&lt;T&gt;&gt; future)
 -----
 
-This function creates an Observable<T> object which provides an interface for observing the input future.  That is designed to handle following use-case:
+This function creates an Observable<T> object which provides an interface for observing the input future. That is designed to handle the following use-case:
 
-```
+```c++
 QFuture<QImage> readImagesFromFolder(const QString& folder) {
 
     auto worker = [=]() {
@@ -316,7 +316,7 @@ QFuture<QImage> result = combinator.subscribe([=](){
     return f1.result();
 }).future();
 
-QCOMPARE(combinator.progressMaximum, 2);
+QCOMPARE(combinator.future().progressMaximum(), 2);
 ```
 
 Once all the observed futures finished, the contained future will be finished too.  And it will be cancelled immediately if any one of the observed future is cancelled in fail fast mode. In case you want the cancellation take place after all the futures finished, you should set mode to `AsyncFuture::AllSettled`.
@@ -325,9 +325,9 @@ Since v0.4.1, the `progressValue` and `progressMaximum` of the obtained future w
 
 Since v0.3.6, you may assign a deferred object to Combinator directly.
 
-Example 
+Example
 
-```
+```c++
 QFuture<QImage> f1 = QtConcurrent::run(readImage, QString("image.jpg"));
 auto defer = deferred<void>();
 
@@ -363,12 +363,12 @@ Observable&lt;T&gt;
 
 Observable&lt;T&gt; is a chainable utility class for observing a QFuture object. It is created by the observe() function. It can register multiple callbacks to be triggered in different situations. And that will create a new Observable&lt;T&gt; / QFuture object to represent the result of the callback function. It may even call QtConcurrent::run() within the callback function to run the funciton in another thread. Therefore, it could create a more complex/flexible workflow.
 
-```
-QFuture<int> future
+```c++
+QFuture<int> future;
 
-Observable<int> observable1 = AsyncFuture::observe(future); 
+Observable<int> observable1 = AsyncFuture::observe(future);
 // or
-auto observable2 = AsyncFuture::observe(future); 
+auto observable2 = AsyncFuture::observe(future);
 ```
 **QFuture&lt;T&gt; Observable&lt;T&gt;::future()**
 
@@ -428,10 +428,10 @@ auto worker = [&]() {
     QThread* workerThread = QThread::currentThread();
 
     observe(localTimeout(50)).context(context.data(), [localTimeout, context]() {
-        qDebug() << "First time localTimeout() finished
+        qDebug() << "First time localTimeout() finished";
         return localTimeout(50);
     }).context(context.data(), [context, &called, workerThread, &loop]() {
-        qDebug() << "Second time localTimeout() finished
+        qDebug() << "Second time localTimeout() finished";
         loop.quit();
     });
 
@@ -483,13 +483,13 @@ Added since v0.3.6.4
 
 **Chained Progress**
 
-`observe().subscribe().future()` future will report progress accordingly to the underlying future chain. When watching the final future in the chain, `progressRangeChanged` may be be updated multiple times as futures in the chain update their individual `progressRangeChanged`. When visualizing final future's progress in a progress bar, progressValue may appear to go in reverse, as progressRange increases. `progressValueChanged` will never go down as execution continues. 
+`observe().subscribe().future()` future will report progress accordingly to the underlying future chain. When watching the final future in the chain, `progressRangeChanged` may be updated multiple times as futures in the chain update their individual `progressRangeChanged`. When visualizing final future's progress in a progress bar, progressValue may appear to go in reverse, as progressRange increases. `progressValueChanged` will never go down as execution continues. 
 
 Example:
 
-```{c++}
+```c++
     QVector<int> ints(100);
-    std::iota(ints.begin(), ints.end(), ints.size()); // Make ints from 1 to 100, increament by 1
+    std::iota(ints.begin(), ints.end(), ints.size()); // Make ints from 1 to 100, increment by 1
     
     // Worker function
     std::function<int (int)> func = [](int x)->int {
@@ -520,7 +520,7 @@ The `deferred<T>()` function return a Deferred<T> object that allows you to mani
 
 The usage of complete/cancel in a Deferred object is pretty similar to the resolve/reject in a Promise object. You could complete a future by calling complete with a result value. If you give it another future, then it will observe the input future and change status once that is finished.
 
-`deffered<T>()` that are created and immediately completed it's recommend to use `completed<T>()` instead. 
+For a `deferred<T>()` that is created and immediately completed, it's recommended to use `completed<T>()` instead.
 
 **Auto Cancellation**
 
@@ -574,13 +574,13 @@ This future object is deferred to cancel according to the input future. Once it 
 
 Track the progress and synchronize the status of the target future object.
 
-It will forward the signal of `started` , `resumed` , `paused` . And synchonize  the `progressValue`, `progressMinimum` and `progressMaximum` value by listening the  `progressValueChanged` signal from target future object.
+It will forward the signal of `started`, `resumed`, `paused`. And synchronize the `progressValue`, `progressMinimum` and `progressMaximum` value by listening the `progressValueChanged` signal from target future object.
 
 Remarks: It won't complete a future even the `progressValue` has been reached the maximum value.
 
 Added since v0.3.6
 
-completed();
+completed()
 -----------
 
 The `completed<T>(const T&)` and `completed()` function return finished `QFuture<T>`
@@ -604,14 +604,14 @@ a completed `QFuture<T>`.
 
 Example
 
-```
+```c++
 auto defer = AsyncFuture::deferred<void>();
 
 auto mappedFuture = QtConcurrent::mapped(data, workerFunc);
 
 defer.track(mappedFuture);
 
-AsyncFuture::observe(mappedFuture).subscribute([=]() mutable {
+AsyncFuture::observe(mappedFuture).subscribe([=]() mutable {
    defer.complete();
 });
 
@@ -712,7 +712,7 @@ Example:
 Future Object Tracking
 ---------------
 
-Since v0.4, the deferred object is supported to track the status of another future object. It will synchronize the `progressValue` / `progressMinimium ` /  `progressMaximium` and status of the tracking object. (e.g started signal)
+Since v0.4, the deferred object is supported to track the status of another future object. It will synchronize the `progressValue` / `progressMinimum` / `progressMaximum` and status of the tracking object. (e.g started signal)
 
 For example:
 
@@ -754,16 +754,14 @@ In the example code above, the future returned by `defer.future` is supposed to 
 
 In case it needs to track the status of a future object but it won’t complete automatically. It may use track() function
 
-Restarter<T> 
+Restarter&lt;T&gt;
 ---
 Restarter is a helper for managing asynchronous operations in Qt/Concurrent. It lets you “restart” a long-running task whenever inputs change, ensuring that only the most recent invocation actually runs to completion. Previous runs are cancelled cleanly before the next one begins.
 
-When to use
+**When to use**
 
-Debouncing or reload-on-change
-If you have a UI element (e.g. a search box, filter slider, map viewport) that triggers an expensive asynchronous operation on every change, use Restarter to avoid piling up simultaneous tasks. Only the latest action will complete; in-flight tasks get cancelled.
-Auto-retry with updated parameters
-When your parameters change mid-flight, you want to cancel the current job and start a fresh one with new arguments, but only once the old job actually acknowledges cancellation.
+- **Debouncing or reload-on-change** — If you have a UI element (e.g. a search box, filter slider, map viewport) that triggers an expensive asynchronous operation on every change, use Restarter to avoid piling up simultaneous tasks. Only the latest action will complete; in-flight tasks get cancelled.
+- **Auto-retry with updated parameters** — When your parameters change mid-flight, you want to cancel the current job and start a fresh one with new arguments, but only once the old job actually acknowledges cancellation.
 
 **How it works**
 
@@ -784,7 +782,7 @@ When your parameters change mid-flight, you want to cancel the current job and s
 
 Imagine you have a search field and want to fire off a network request each time the text changes, but cancel any pending request as soon as the user types again:
 
-```
+```c++
 // 1) Create a Restarter<int> (or whatever T your request returns)
 Restarter<ResponseData> restarter{ this };
 
