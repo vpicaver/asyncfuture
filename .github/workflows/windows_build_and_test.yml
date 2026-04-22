@@ -31,7 +31,6 @@ jobs:
       with:
         version: ${{ matrix.qt_version }}
         arch: 'win64_msvc2022_64'
-        modules: 'qtdeclarative'
 
     - name: Create Build Environment
       shell: cmd

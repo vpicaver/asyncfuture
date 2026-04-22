@@ -36,7 +36,6 @@ jobs:
       uses: jurplel/install-qt-action@v4
       with:
         version: ${{ matrix.qt_version }}
-        modules: 'qtdeclarative'
 
     - name: Create Build Environment
       run: cmake -S . -B build -G Ninja -DENABLE_TESTING:BOOL=ON -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS="-fsanitize=address"
