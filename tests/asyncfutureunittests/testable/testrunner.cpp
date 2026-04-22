@@ -57,11 +57,7 @@ bool TestRunner::exec(QStringList arguments)
     QVariant item;
     bool error = false;
 
-#if QT_VERSION >= 0x060000
     auto type = item.typeId();
-#elif QT_VERSION >= 0x050000
-    auto type = (int)item.type();
-#endif
 
 
     foreach (item,m_testObjects) {

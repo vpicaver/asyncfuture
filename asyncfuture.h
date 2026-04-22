@@ -498,15 +498,9 @@ public:
             thiz->reportStarted();
         });
 
-#if QT_VERSION >= 0x060000
         QObject::connect(watcher, &QFutureWatcher<ANY>::suspending, this, [=](){
             thiz->future().toggleSuspended();
         });
-#elif QT_VERSION >= 0x050000
-        QObject::connect(watcher, &QFutureWatcher<ANY>::paused, this, [=](){
-            thiz->future().togglePaused();
-        });
-#endif
 
         QObject::connect(watcher, &QFutureWatcher<ANY>::resumed, this, [=](){
             thiz->future().resume();
@@ -521,15 +515,9 @@ public:
             QFutureInterface<T>::reportStarted();
         }
 
-#if QT_VERSION >= 0x060000
         if (future.isSuspended()) {
             QFutureInterface<T>::setSuspended(true);
         }
-#elif QT_VERSION >= 0x050000
-        if (future.isPaused()) {
-            QFutureInterface<T>::setPaused(true);
-        }
-#endif
     }
 
     bool isFinished() const {
@@ -1105,12 +1093,7 @@ public:
                     if (type.id() == QMetaType::QVariant) {
                         v = *reinterpret_cast<QVariant *>(_a[1]);
                     } else {
-#if QT_VERSION >= 0x060000
                         v = QVariant(type, _a[1]);
-#elif QT_VERSION >= 0x050000
-                        v = QVariant(type.id(), _a[1]);
-#endif
-
                     }
                 }
                 callback(v);
@@ -1487,13 +1470,7 @@ public:
 
     void onFinished(std::function<void()> func) {
         auto runOnMainThread = [=]() {
-#if QT_VERSION < QT_VERSION_CHECK(5, 10, 0)
-
-        QObject tmp;
-        QObject::connect(&tmp, &QObject::destroyed, QCoreApplication::instance(), func, Qt::QueuedConnection);
-#else
-        QMetaObject::invokeMethod(QCoreApplication::instance(), func, Qt::QueuedConnection);
-#endif
+            QMetaObject::invokeMethod(QCoreApplication::instance(), func, Qt::QueuedConnection);
         };
 
         subscribe(runOnMainThread, runOnMainThread);

@@ -5,27 +5,9 @@ project(asyncfutureunittests VERSION 1.0.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
-# Find the Qt package
-#find_package(Qt6 6.5 REQUIRED COMPONENTS Test QuickTest Concurrent Qml Quick)
-
-# Initialize variables to store required Qt components
 set(QT_COMPONENTS Test Gui Concurrent Qml Quick QuickTest)
 
-# Attempt to find Qt6 first
-find_package(Qt6 6.0 QUIET COMPONENTS ${QT_COMPONENTS})
-#find_package(Qt6 6.0 COMPONENTS ${QT_COMPONENTS})
-
-if(Qt6_FOUND)
-  message(STATUS "Using Qt6")
-else()
-  # If Qt6 is not found, attempt to find Qt5
-  find_package(Qt5 5.15 REQUIRED COMPONENTS ${QT_COMPONENTS})
-  if(Qt5_FOUND)
-    message(STATUS "Using Qt5")
-  else()
-    message(FATAL_ERROR "Neither Qt6 nor Qt5 was found!")
-  endif()
-endif()
+find_package(Qt6 6.8 REQUIRED COMPONENTS ${QT_COMPONENTS})
 
 # Add qtshell
 add_library(qtshell STATIC

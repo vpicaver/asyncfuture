@@ -4,7 +4,7 @@
 ![GitHub Workflow Status](https://github.com/vpicaver/asyncfuture/actions/workflows/windows_build_and_test.yml/badge.svg)
 
 
-AsyncFuture is a header only library tested using Qt 5.15 and Qt 6.2 or later.
+AsyncFuture is a header only library. It requires Qt 6.8 or later.
 
 QFuture is used together with QtConcurrent to represent the result of an asynchronous computation. It is a powerful component for multi-thread programming. But its usage is limited to the result of threads, it doesn't work with the asynchronous signal emitted by QObject. And it is a bit trouble to setup the listener function via QFutureWatcher.
 
