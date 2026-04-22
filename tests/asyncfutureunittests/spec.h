@@ -129,4 +129,7 @@ private slots:
     void test_restarter_queued_rapid_fire();
     void test_restarter_queued_dangling_this();
     void test_restarter_null_context();
+    void test_restarter_qpromise_cancel_inner_loop();
+    void test_subscribe_qpromise_cancel_inner_loop();
+    void test_context_qpromise_cancel_inner_loop();
 };

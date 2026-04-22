@@ -2438,3 +2438,145 @@ void Spec::test_restarter_null_context() {
     QCOMPARE(restarter.future().isCanceled(), false);
     QCOMPARE(restarter.future().result(), 42);
 }
+
+void Spec::test_restarter_qpromise_cancel_inner_loop() {
+    Restarter<int> restarter(QCoreApplication::instance());
+
+    QAtomicInt firstIterations(0);
+    QAtomicInt firstStarted(0);
+    QAtomicInt secondIterations(0);
+
+    QSemaphore letFirstProceed;
+
+    const int loopCount = 500;
+
+    restarter.restart([&]() -> QFuture<int> {
+        return QtConcurrent::run([&](QPromise<int>& promise) {
+            firstStarted.storeRelease(1);
+            // Block until the second restart() has been queued, so cancel
+            // lands before the loop can finish on a fast machine.
+            letFirstProceed.acquire();
+            for (int i = 0; i < loopCount; i++) {
+                if (promise.isCanceled()) return;
+                firstIterations.fetchAndAddOrdered(1);
+                // Yield between iterations so cancel has time to propagate
+                // on hosts with coarse timers.
+                QThread::usleep(50);
+            }
+            promise.addResult(1);
+        });
+    });
+
+    // waitUntil pumps the event loop so Restarter's queued startRun fires.
+    QVERIFY(waitUntil([&]() { return firstStarted.loadAcquire() == 1; }, 5000));
+
+    restarter.restart([&]() -> QFuture<int> {
+        return QtConcurrent::run([&](QPromise<int>& promise) {
+            for (int i = 0; i < 5; i++) {
+                if (promise.isCanceled()) return;
+                secondIterations.fetchAndAddOrdered(1);
+            }
+            promise.addResult(2);
+        });
+    });
+
+    letFirstProceed.release();
+
+    waitForFinished(restarter.future());
+
+    QCOMPARE(restarter.future().isFinished(), true);
+    QCOMPARE(restarter.future().isCanceled(), false);
+    QCOMPARE(restarter.future().result(), 2);
+
+    QVERIFY2(firstIterations.loadRelaxed() < loopCount,
+             "first worker should have short-circuited via promise.isCanceled()");
+    QCOMPARE(secondIterations.loadRelaxed(), 5);
+}
+
+void Spec::test_subscribe_qpromise_cancel_inner_loop() {
+    QAtomicInt iterations(0);
+    QAtomicInt started(0);
+    QAtomicInt onCompletedCalls(0);
+    QAtomicInt onCancelledCalls(0);
+
+    QSemaphore letProceed;
+    const int loopCount = 500;
+
+    auto work = QtConcurrent::run([&](QPromise<int>& promise) {
+        started.storeRelease(1);
+        letProceed.acquire();
+        for (int i = 0; i < loopCount; i++) {
+            if (promise.isCanceled()) return;
+            iterations.fetchAndAddOrdered(1);
+            QThread::usleep(50);
+        }
+        promise.addResult(1);
+    });
+
+    auto chain = observe(work).subscribe(
+        [&]() { onCompletedCalls.fetchAndAddOrdered(1); },
+        [&]() { onCancelledCalls.fetchAndAddOrdered(1); }
+    ).future();
+
+    QVERIFY(waitUntil([&]() { return started.loadAcquire() == 1; }, 5000));
+
+    // Cancel from the chain end — must propagate up to `work`.
+    chain.cancel();
+    letProceed.release();
+
+    waitForFinished(chain);
+
+    QCOMPARE(chain.isCanceled(), true);
+    QCOMPARE(work.isCanceled(), true);
+    QVERIFY2(iterations.loadRelaxed() < loopCount,
+             "worker should have short-circuited via promise.isCanceled()");
+
+    // subscribe() routes onCancelled through the main thread — pump events.
+    QVERIFY(waitUntil([&]() { return onCancelledCalls.loadAcquire() == 1; }, 5000));
+    QCOMPARE(onCompletedCalls.loadRelaxed(), 0);
+}
+
+void Spec::test_context_qpromise_cancel_inner_loop() {
+    // Explicit chain.cancel() on a context() chain back-propagates to the
+    // upstream. Destroying the context object is a DIFFERENT operation —
+    // it cancels the chain-end future but NOT the upstream (see README).
+    QAtomicInt iterations(0);
+    QAtomicInt started(0);
+    QAtomicInt onCompletedCalls(0);
+    QAtomicInt onCancelledCalls(0);
+
+    QSemaphore letProceed;
+    const int loopCount = 500;
+
+    auto work = QtConcurrent::run([&](QPromise<int>& promise) {
+        started.storeRelease(1);
+        letProceed.acquire();
+        for (int i = 0; i < loopCount; i++) {
+            if (promise.isCanceled()) return;
+            iterations.fetchAndAddOrdered(1);
+            QThread::usleep(50);
+        }
+        promise.addResult(1);
+    });
+
+    QObject context;
+    auto chain = observe(work).context(&context,
+        [&]() { onCompletedCalls.fetchAndAddOrdered(1); },
+        [&]() { onCancelledCalls.fetchAndAddOrdered(1); }
+    ).future();
+
+    QVERIFY(waitUntil([&]() { return started.loadAcquire() == 1; }, 5000));
+
+    chain.cancel();
+    letProceed.release();
+
+    waitForFinished(chain);
+
+    QCOMPARE(chain.isCanceled(), true);
+    QCOMPARE(work.isCanceled(), true);
+    QVERIFY2(iterations.loadRelaxed() < loopCount,
+             "worker should have short-circuited via promise.isCanceled()");
+
+    QVERIFY(waitUntil([&]() { return onCancelledCalls.loadAcquire() == 1; }, 5000));
+    QCOMPARE(onCompletedCalls.loadRelaxed(), 0);
+}

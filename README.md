@@ -814,6 +814,85 @@ connect(searchLineEdit, &QLineEdit::textChanged, this,
 * displayResults() sees only the latest completed response.
 
 
+Cooperative cancellation inside a worker (QPromise)
+---
+
+AsyncFuture can propagate cancellation up a chain — `chain.cancel()` flows back to the source `QFuture` — but **QtConcurrent workers don't abort mid-function automatically.** A worker only stops if it cooperates by polling the cancellation state. The Qt-native way to do that is to take a `QPromise<T>&` argument:
+
+```cpp
+auto future = QtConcurrent::run([input](QPromise<QImage>& promise) {
+    for (int i = 0; i < bigN; i++) {
+        if (promise.isCanceled()) return;          // cooperative early-exit
+        doExpensiveStep(i, input);
+    }
+    promise.addResult(renderResult(input));
+});
+```
+
+`promise.isCanceled()` and the returned `QFuture<T>` share cancel state, so **any cancel that back-propagates to that future — a Restarter restart, a direct `future.cancel()`, or a chain-end cancel via `observe().subscribe().future().cancel()` / `observe().context(ctx, ...).future().cancel()` — flips the flag the worker is polling.**
+
+> **Caveat on `context()` destruction:** destroying the context object only cancels the Observable's returned future — it does **not** back-propagate to the upstream worker. If you want context-scoped lifetime *and* cooperative worker cancellation, call `chain.cancel()` explicitly when the scope ends, or use `Restarter` (which bakes the cancel-in-flight behaviour in).
+
+Works identically with `Restarter`, `subscribe`, and `context`:
+
+**With Restarter** — rapid restarts cancel the in-flight worker:
+
+```cpp
+Restarter<QImage> restarter{ this };
+restarter.restart([input]() -> QFuture<QImage> {
+    return QtConcurrent::run([input](QPromise<QImage>& promise) {
+        for (int i = 0; i < bigN; i++) {
+            if (promise.isCanceled()) return;
+            doExpensiveStep(i, input);
+        }
+        promise.addResult(finalize(input));
+    });
+});
+// A second restart(...) call cancels the running worker via its QPromise.
+```
+
+**With `observe().subscribe()`** — cancel the chain end and the worker sees it:
+
+```cpp
+auto work = QtConcurrent::run([](QPromise<int>& p) {
+    for (int i = 0; i < bigN; i++) {
+        if (p.isCanceled()) return;
+        doStep(i);
+    }
+    p.addResult(42);
+});
+
+auto chain = observe(work).subscribe(
+    [](int r) { /* onCompleted */ },
+    []()      { /* onCancelled */ }
+).future();
+
+chain.cancel();   // propagates up to `work`, which flips promise.isCanceled()
+```
+
+**With `observe().context()`** — explicit chain-end cancel back-propagates into the worker:
+
+```cpp
+auto work = QtConcurrent::run([](QPromise<int>& p) { /* polling loop */ });
+auto chain = observe(work).context(contextObject,
+    [](int r) { /* onCompleted */ },
+    []()      { /* onCancelled */ }
+).future();
+
+chain.cancel();   // propagates up to `work`, which flips promise.isCanceled()
+```
+
+If you need worker cancellation tied to the lifetime of `contextObject`, call `chain.cancel()` from the context's destructor (or simpler: reach for `Restarter`).
+
+**Rules of thumb:**
+
+- Poll `promise.isCanceled()` between expensive steps — it's an atomic load, cheap per iteration. For *very* tight inner loops, check every N iterations.
+- On the cancelled path, **do not call `promise.addResult()`**. The downstream observer reads `future.resultCount() == 0` (or `future.isCanceled()`) to skip any "on success" side-effects.
+- `promise.setProgressValue()` and `promise.setProgressRange()` are also available on the same promise if you want a progress bar for the same worker.
+- This pattern is not specific to `Restarter` — any `QFuture<T>` produced by `QtConcurrent::run([](QPromise<T>&){...})` supports it, regardless of what chain sits on top.
+
+See `Spec::test_restarter_qpromise_cancel_inner_loop`, `Spec::test_subscribe_qpromise_cancel_inner_loop`, and `Spec::test_context_qpromise_cancel_inner_loop` for executable examples of each.
+
 waitForFinished()
 ---
 Sometimes you need to block until a QFuture<T> completes, but you don’t want to spin your test harness or lose signal/slot delivery in unit tests. This helper uses a QFutureWatcher<T> and a minimal QEventLoop (with an optional timeout) to pump events needed for Qt’s testing framework while waiting.
