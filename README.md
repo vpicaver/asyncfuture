@@ -891,6 +891,76 @@ If you need worker cancellation tied to the lifetime of `contextObject`, call `c
 
 See `Spec::test_restarter_qpromise_cancel_inner_loop`, `Spec::test_subscribe_qpromise_cancel_inner_loop`, and `Spec::test_context_qpromise_cancel_inner_loop` for executable examples of each.
 
+Reporting progress from a QPromise worker
+---
+
+The same `QPromise<T>&` parameter that drives cooperative cancellation also drives progress: call `promise.setProgressRange(min, max)` once, then `promise.setProgressValue(i)` as work advances. The returned `QFuture<T>` emits `progressRangeChanged` / `progressValueChanged` exactly as if you had used `QtConcurrent::mapped` — AsyncFuture doesn't need to know the worker is QPromise-based.
+
+```c++
+auto future = QtConcurrent::run([input](QPromise<int>& promise) {
+    promise.setProgressRange(0, input.size());
+    for (int i = 0; i < input.size(); ++i) {
+        if (promise.isCanceled()) return;
+        doStep(input[i]);
+        promise.setProgressValue(i + 1);
+    }
+    promise.addResult(input.size());
+});
+```
+
+**Through `.context()` / `.subscribe()`** — the chain's returned future mirrors the source's progress. Attach a `QFutureWatcher<T>` to the chain, not to the source:
+
+```c++
+auto chain = observe(work).context(ctx, [](int r) { return r; }).future();
+
+QFutureWatcher<int> watcher;
+connect(&watcher, &QFutureWatcher<int>::progressValueChanged,
+        [&](int v) { /* update UI */ });
+watcher.setFuture(chain);
+```
+
+**Through `Restarter`** — the outer future (`restarter.future()`) forwards progress from whichever inner worker is currently in-flight, and swaps sources cleanly on each `restart(...)`. Useful for a single progress bar bound to "whatever task is running right now":
+
+```c++
+Restarter<int> restarter{ this };
+restarter.restart([input]() -> QFuture<int> {
+    return QtConcurrent::run([input](QPromise<int>& promise) {
+        promise.setProgressRange(0, input.size());
+        for (int i = 0; i < input.size(); ++i) {
+            if (promise.isCanceled()) return;
+            doStep(input[i]);
+            promise.setProgressValue(i + 1);
+        }
+        promise.addResult(input.size());
+    });
+});
+
+QFutureWatcher<int> watcher;
+connect(&watcher, &QFutureWatcher<int>::progressValueChanged,
+        [&](int v) { /* update UI */ });
+watcher.setFuture(restarter.future());
+```
+
+**Chained workers accumulate** — when a `context()` / `subscribe()` callback returns another `QFuture<T>`, the chain's `progressMaximum` becomes the *sum* of the source's range and the inner's range (see the "Chained Progress" section above). A two-stage pipeline with stages of 10 and 20 steps reports a total range of 30:
+
+```c++
+auto outer = runStage(10);          // QPromise worker, range 0..10
+auto chain = observe(outer).context(ctx, [](int) {
+    return runStage(20);            // QPromise worker, range 0..20
+}).future();
+// chain.progressMaximum() == 30 once both stages finish.
+```
+
+> **Gotcha for tests:** `observe(f).context(...)` seeds the chain's range **synchronously** from `f.progressMinimum()` / `f.progressMaximum()` before `.future()` returns. A `QFutureWatcher` attached *after* that point will not see the initial `progressRangeChanged` — check `chain.progressMaximum()` directly instead. Progress *values* are always delivered through queued signals as the worker runs, so watchers capture those normally. `Restarter` queues its first `startRun()` onto the event loop, so a watcher attached to `restarter.future()` before `waitUntil(...)` sees every progress change.
+
+**Rules of thumb:**
+
+- Call `setProgressRange()` once at the top of the worker. Calling it again mid-run emits a new `progressRangeChanged` on the source future — which in a chain triggers a `DeferredFuture::updateProgressRanges` recomputation.
+- It's safe (and idiomatic) to combine progress and cancellation on the same promise: poll `promise.isCanceled()` between steps and bail without calling `addResult()`.
+- `QFutureWatcher` coalesces rapid `progressValueChanged` emissions — don't expect a 1:1 signal for every `setProgressValue` call on a fast worker.
+
+See `Spec::test_context_qpromise_progress`, `Spec::test_restarter_qpromise_progress`, `Spec::test_restarter_qpromise_progress_across_restarts`, and `Spec::test_context_chain_qpromise_progress_accumulates` for executable examples of each pattern, plus the `ProgressCapture<T>` test helper in `testfunctions.h` for capturing progress history in assertions.
+
 waitForFinished()
 ---
 Sometimes you need to block until a QFuture<T> completes, but you don’t want to spin your test harness or lose signal/slot delivery in unit tests. This helper uses a QFutureWatcher<T> and a minimal QEventLoop (with an optional timeout) to pump events needed for Qt’s testing framework while waiting.
