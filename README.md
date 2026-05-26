@@ -778,6 +778,10 @@ Restarter is a helper for managing asynchronous operations in Qt/Concurrent. It 
 4. Safety on context deletion
   * Because the watcher is tied to a QObject* context, if that context is destroyed before cancellation completes, the watcher is cleaned up and you’ll get a cancelled future.
 
+**Cancelling from the outside**
+
+Calling `restarter.future().cancel()` cancels both the outer future the user is holding **and** the inner running `QFuture` — so a worker that polls `promise.isCanceled()` will see the cancel and can short-circuit. After an external cancel, the next call to `restart()` produces a fresh outer future (a new `restarter.future()`); previously held handles to the cancelled future stay cancelled.
+
 **Quick Example**
 
 Imagine you have a search field and want to fire off a network request each time the text changes, but cancel any pending request as soon as the user types again:

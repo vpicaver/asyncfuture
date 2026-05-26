@@ -1887,6 +1887,17 @@ public:
                 isCancelling = true;
                 pendingStart = [this]() { startRun(); };
 
+                // If the outer future has already settled (typically because
+                // the user called restarter.future().cancel()), start a fresh
+                // Deferred so the upcoming run can deliver a result. Mirrors
+                // the burst-start path's outerDeferred reassignment.
+                if (outerDeferred.future().isFinished()) {
+                    outerDeferred = AsyncFuture::deferred<T>();
+                    if (changedCallback) {
+                        changedCallback();
+                    }
+                }
+
                 //Watch for when the Future is cancelled
                 auto alive = m_alive;
                 AsyncFuture::observe(activeInner).context(context,
@@ -1949,6 +1960,21 @@ private:
                                             [this, gen = generation, inner]() {
                                                 deliver(gen, inner);
                                             });
+
+        // Push cancel from the outer future down to the inner. Without this,
+        // calling restarter.future().cancel() would only mark the outer
+        // canceled while the inner worker kept running — its
+        // QPromise::isCanceled() would never flip. The lambda captures only
+        // the inner QFuture by value, so it is safe to fire after the
+        // Restarter is destroyed (cancel on an already-finished future is a
+        // no-op). Mirrors the pushCancel pattern in Deferred::complete().
+        AsyncFuture::observe(outerDeferred.future()).context(observeContext,
+                                                             [](){}, //Do nothing on complete
+                                                             [inner]() mutable {
+                                                                 if (inner.isRunning()) {
+                                                                     inner.cancel();
+                                                                 }
+                                                             });
 
         activeInner = inner;
     }

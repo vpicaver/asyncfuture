@@ -2757,3 +2757,116 @@ void Spec::test_context_chain_qpromise_progress_accumulates() {
     QVERIFY2(progress.values().size() >= 3,
              "expected progress reports from both outer and inner stages");
 }
+
+void Spec::test_restarter_outer_cancel_propagates_to_inner() {
+    // Calling cancel() on the Restarter's outer QFuture must propagate down
+    // to the running inner worker so that QPromise::isCanceled() flips and
+    // the worker can cooperatively short-circuit. This is the same contract
+    // already documented for `observe(...).context(...).future().cancel()`.
+
+    Restarter<int> restarter(QCoreApplication::instance());
+
+    QAtomicInt iterations(0);
+    QAtomicInt started(0);
+
+    QSemaphore letProceed;
+    const int loopCount = 500;
+
+    restarter.restart([&]() -> QFuture<int> {
+        return QtConcurrent::run([&](QPromise<int>& promise) {
+            started.storeRelease(1);
+            letProceed.acquire();
+            for (int i = 0; i < loopCount; i++) {
+                if (promise.isCanceled()) return;
+                iterations.fetchAndAddOrdered(1);
+                QThread::usleep(50);
+            }
+            promise.addResult(1);
+        });
+    });
+
+    auto outer = restarter.future();
+
+    // Wait until the queued startRun has fired and the worker is blocked
+    // on the semaphore. waitUntil pumps the event loop.
+    QVERIFY(waitUntil([&]() { return started.loadAcquire() == 1; }, 5000));
+
+    outer.cancel();
+    letProceed.release();
+
+    waitForFinished(outer);
+
+    QCOMPARE(outer.isCanceled(), true);
+    QVERIFY2(iterations.loadRelaxed() < loopCount,
+             "worker should have short-circuited via promise.isCanceled()");
+}
+
+void Spec::test_restarter_outer_cancel_then_restart() {
+    // After the user cancels the outer future, the next restart() should
+    // still produce a fresh outer that runs to completion. Outer cancel must
+    // not leave the Restarter in a stuck state.
+
+    Restarter<int> restarter(QCoreApplication::instance());
+
+    QAtomicInt firstStarted(0);
+    QSemaphore letFirstProceed;
+
+    restarter.restart([&]() -> QFuture<int> {
+        return QtConcurrent::run([&](QPromise<int>& promise) {
+            firstStarted.storeRelease(1);
+            letFirstProceed.acquire();
+            for (int i = 0; i < 500; i++) {
+                if (promise.isCanceled()) return;
+                QThread::usleep(50);
+            }
+            promise.addResult(1);
+        });
+    });
+
+    auto firstOuter = restarter.future();
+    QVERIFY(waitUntil([&]() { return firstStarted.loadAcquire() == 1; }, 5000));
+
+    firstOuter.cancel();
+    letFirstProceed.release();
+    waitForFinished(firstOuter);
+    QCOMPARE(firstOuter.isCanceled(), true);
+
+    // A new restart after the cancel must produce a fresh outer that runs.
+    restarter.restart([]() -> QFuture<int> {
+        return QtConcurrent::run([]() { return 42; });
+    });
+
+    auto secondOuter = restarter.future();
+    waitForFinished(secondOuter);
+
+    QCOMPARE(secondOuter.isFinished(), true);
+    QCOMPARE(secondOuter.isCanceled(), false);
+    QCOMPARE(secondOuter.result(), 42);
+}
+
+void Spec::test_restarter_outer_cancel_after_finished() {
+    // Cancelling the outer future AFTER the inner has already completed
+    // must not crash, must not invoke the inner-cancel push (the inner is
+    // already done), and must leave the stored result accessible. Qt's
+    // QFuture::cancel() will still flip isCanceled() on a finished future
+    // — that is standard Qt behavior, not specific to Restarter — but the
+    // result is preserved.
+
+    Restarter<int> restarter(QCoreApplication::instance());
+
+    restarter.restart([]() -> QFuture<int> {
+        return QtConcurrent::run([]() { return 7; });
+    });
+
+    auto outer = restarter.future();
+    waitForFinished(outer);
+
+    QCOMPARE(outer.isFinished(), true);
+    QCOMPARE(outer.isCanceled(), false);
+    QCOMPARE(outer.result(), 7);
+
+    // Late cancel: must not crash and must leave the result accessible.
+    outer.cancel();
+    QCOMPARE(outer.isFinished(), true);
+    QCOMPARE(outer.result(), 7);
+}

@@ -130,6 +130,9 @@ private slots:
     void test_restarter_queued_dangling_this();
     void test_restarter_null_context();
     void test_restarter_qpromise_cancel_inner_loop();
+    void test_restarter_outer_cancel_propagates_to_inner();
+    void test_restarter_outer_cancel_then_restart();
+    void test_restarter_outer_cancel_after_finished();
     void test_subscribe_qpromise_cancel_inner_loop();
     void test_context_qpromise_cancel_inner_loop();
 
