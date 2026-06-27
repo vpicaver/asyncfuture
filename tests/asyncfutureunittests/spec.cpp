@@ -2870,3 +2870,96 @@ void Spec::test_restarter_outer_cancel_after_finished() {
     QCOMPARE(outer.isFinished(), true);
     QCOMPARE(outer.result(), 7);
 }
+
+void Spec::test_restarter_onFutureChanged_delivers_once() {
+    // onFutureChanged means "future() now points to a NEW future". A consumer
+    // that re-attaches observe(future()).context() on every change must see one
+    // delivery per logical run. Restarter must therefore fire changedCallback
+    // ONLY where a fresh outerDeferred is installed (the restart() paths), never
+    // again when the existing outer merely completes — else the second attach
+    // observes an already-finished future, AsyncFuture delivers it immediately,
+    // and the continuation runs twice for ONE restart().
+
+    QObject context;
+    Restarter<int> restarter(QCoreApplication::instance());
+
+    QAtomicInt deliveries(0);
+
+    restarter.onFutureChanged([&]() {
+        AsyncFuture::observe(restarter.future())
+            .context(&context, [&]() {
+                if (restarter.future().resultCount() == 0) {
+                    return; // cancelled
+                }
+                deliveries.fetchAndAddOrdered(1);
+            });
+    });
+
+    restarter.restart([]() -> QFuture<int> {
+        return QtConcurrent::run([]() {
+            QThread::msleep(20);
+            return 42;
+        });
+    });
+
+    waitForFinished(restarter.future());
+    Test::tick(); // drain queued context() callbacks
+
+    QCOMPARE(restarter.future().result(), 42);
+    QCOMPARE(deliveries.loadRelaxed(), 1);
+}
+
+void Spec::test_restarter_chain_kicks_next_stage_once() {
+    // The chain-level consequence: two restarters wired like a producer ->
+    // consumer hand-off (stage A's delivery restarts stage B). One A run must
+    // kick B exactly once. If A double-delivers, B.restart() is driven twice.
+
+    QObject context;
+    Restarter<int> stageA(QCoreApplication::instance());
+    Restarter<int> stageB(QCoreApplication::instance());
+
+    QAtomicInt kicks(0);
+    QAtomicInt bDeliveries(0);
+
+    stageB.onFutureChanged([&]() {
+        AsyncFuture::observe(stageB.future())
+            .context(&context, [&]() {
+                if (stageB.future().resultCount() == 0) {
+                    return;
+                }
+                bDeliveries.fetchAndAddOrdered(1);
+            });
+    });
+
+    stageA.onFutureChanged([&]() {
+        AsyncFuture::observe(stageA.future())
+            .context(&context, [&]() {
+                if (stageA.future().resultCount() == 0) {
+                    return;
+                }
+                kicks.fetchAndAddOrdered(1);
+                stageB.restart([]() -> QFuture<int> {
+                    return QtConcurrent::run([]() {
+                        QThread::msleep(20);
+                        return 2;
+                    });
+                });
+            });
+    });
+
+    stageA.restart([]() -> QFuture<int> {
+        return QtConcurrent::run([]() {
+            QThread::msleep(20);
+            return 1;
+        });
+    });
+
+    waitForFinished(stageA.future());
+    QVERIFY(waitUntil([&]() { return !stageB.future().isRunning()
+                                     && stageB.future().resultCount() > 0; }, 5000));
+    Test::tick();
+
+    QCOMPARE(stageB.future().result(), 2);
+    QCOMPARE(kicks.loadRelaxed(), 1);
+    QCOMPARE(bDeliveries.loadRelaxed(), 1);
+}

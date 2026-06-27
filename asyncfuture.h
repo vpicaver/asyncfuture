@@ -1989,7 +1989,6 @@ private:
         }
 
         if(future.isCanceled()) {
-            qDebug() << "Future cancelled";
             outerDeferred.cancel();
         } else {
             if constexpr (std::is_same_v<T, void>) {
@@ -1999,9 +1998,14 @@ private:
             }
         }
 
-        if(changedCallback) {
-            changedCallback();
-        }
+        // Do NOT fire changedCallback() here. onFutureChanged means "future()
+        // now points to a NEW future" — it is fired only where a fresh
+        // outerDeferred is installed (the two restart() paths). Completing the
+        // existing outerDeferred does not change the handle the consumer is
+        // already observing; firing here makes a consumer that re-attaches
+        // observe(future()).context() on every change attach a second observer
+        // to the now-finished future, which AsyncFuture delivers immediately —
+        // so the continuation runs twice for one logical run.
     }
 };
 }
