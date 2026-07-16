@@ -2963,3 +2963,226 @@ void Spec::test_restarter_chain_kicks_next_stage_once() {
     QCOMPARE(kicks.loadRelaxed(), 1);
     QCOMPARE(bDeliveries.loadRelaxed(), 1);
 }
+
+void Spec::test_restarter_onResult_delivers_once() {
+    // onResult() encapsulates the onFutureChanged -> observe(future()).context()
+    // wiring plus the cancel/empty guard. For one restart() it must deliver the
+    // run's result exactly once, on the context's thread. This is the audited
+    // replacement for the hand-rolled two-step that harboured the double-fire.
+
+    QObject context;
+    Restarter<int> restarter(QCoreApplication::instance());
+
+    QAtomicInt deliveries(0);
+    int received = 0;
+
+    restarter.onResult(&context, [&](int value) {
+        received = value;
+        deliveries.fetchAndAddOrdered(1);
+    });
+
+    restarter.restart([]() -> QFuture<int> {
+        return QtConcurrent::run([]() {
+            QThread::msleep(20);
+            return 42;
+        });
+    });
+
+    waitForFinished(restarter.future());
+    Test::tick(); // drain queued context() callback
+
+    QCOMPARE(received, 42);
+    QCOMPARE(deliveries.loadRelaxed(), 1);
+}
+
+void Spec::test_restarter_onResult_skips_cancelled() {
+    // A cancelled run must never reach the consumer body. The guard lives in
+    // onResult() so no consumer can forget it.
+
+    QObject context;
+    Restarter<int> restarter(QCoreApplication::instance());
+
+    QAtomicInt deliveries(0);
+
+    restarter.onResult(&context, [&](int) {
+        deliveries.fetchAndAddOrdered(1);
+    });
+
+    restarter.restart([]() -> QFuture<int> {
+        auto deferred = AsyncFuture::deferred<int>();
+        deferred.cancel();
+        return deferred.future();
+    });
+
+    waitForFinished(restarter.future());
+    Test::tick();
+
+    QCOMPARE(restarter.future().isCanceled(), true);
+    QCOMPARE(deliveries.loadRelaxed(), 0);
+}
+
+void Spec::test_restarter_onResult_skips_empty() {
+    // A completed-but-empty run (finished, not cancelled, resultCount() == 0)
+    // must also be dropped — the same case cwLazLayer / cwSketchManager guard
+    // by hand today.
+
+    QObject context;
+    Restarter<int> restarter(QCoreApplication::instance());
+
+    QAtomicInt deliveries(0);
+
+    restarter.onResult(&context, [&](int) {
+        deliveries.fetchAndAddOrdered(1);
+    });
+
+    // A worker that finishes without addResult() — mirrors the real "load
+    // failed / cancelled mid-flight, no result produced" path consumers guard.
+    restarter.restart([]() -> QFuture<int> {
+        return QtConcurrent::run([](QPromise<int>& promise) {
+            Q_UNUSED(promise);
+            QThread::msleep(10);
+        });
+    });
+
+    waitForFinished(restarter.future());
+    Test::tick();
+
+    QCOMPARE(restarter.future().isCanceled(), false);
+    QCOMPARE(restarter.future().resultCount(), 0);
+    QCOMPARE(deliveries.loadRelaxed(), 0);
+}
+
+void Spec::test_restarter_onResult_void() {
+    // For Restarter<void> the callback takes no argument and fires once for a
+    // completed (non-cancelled) run.
+
+    QObject context;
+    Restarter<void> restarter(QCoreApplication::instance());
+
+    QAtomicInt deliveries(0);
+
+    restarter.onResult(&context, [&]() {
+        deliveries.fetchAndAddOrdered(1);
+    });
+
+    restarter.restart([]() -> QFuture<void> {
+        return QtConcurrent::run([]() {
+            QThread::msleep(20);
+        });
+    });
+
+    waitForFinished(restarter.future());
+    Test::tick();
+
+    QCOMPARE(restarter.future().isCanceled(), false);
+    QCOMPARE(deliveries.loadRelaxed(), 1);
+}
+
+void Spec::test_restarter_onResult_context_destroyed() {
+    // observe().context() auto-disconnects when the result context dies. If the
+    // context is destroyed before the run settles, the callback must not fire
+    // and nothing must touch freed memory.
+
+    Restarter<int> restarter(QCoreApplication::instance());
+
+    auto context = new QObject();
+    QAtomicInt deliveries(0);
+
+    restarter.onResult(context, [&](int) {
+        deliveries.fetchAndAddOrdered(1);
+    });
+
+    QSemaphore letProceed;
+    QAtomicInt started(0);
+
+    restarter.restart([&]() -> QFuture<int> {
+        return QtConcurrent::run([&]() {
+            started.storeRelease(1);
+            letProceed.acquire();
+            return 7;
+        });
+    });
+
+    QVERIFY(waitUntil([&]() { return started.loadAcquire() == 1; }, 5000));
+
+    delete context; // context gone before the worker settles
+    letProceed.release();
+
+    waitForFinished(restarter.future());
+    Test::tick();
+
+    QCOMPARE(restarter.future().result(), 7);
+    QCOMPARE(deliveries.loadRelaxed(), 0);
+}
+
+void Spec::test_restarter_onResult_composes_with_onFutureChanged() {
+    // A consumer that also registers each run with a future manager keeps a
+    // thin onFutureChanged() for that side. Both hooks must fire for one run:
+    // onFutureChanged once when the new future is installed, onResult once when
+    // it settles.
+
+    QObject context;
+    Restarter<int> restarter(QCoreApplication::instance());
+
+    QAtomicInt futureChanged(0);
+    QAtomicInt deliveries(0);
+    int received = 0;
+
+    restarter.onFutureChanged([&]() {
+        futureChanged.fetchAndAddOrdered(1);
+    });
+
+    restarter.onResult(&context, [&](int value) {
+        received = value;
+        deliveries.fetchAndAddOrdered(1);
+    });
+
+    restarter.restart([]() -> QFuture<int> {
+        return QtConcurrent::run([]() {
+            QThread::msleep(20);
+            return 99;
+        });
+    });
+
+    waitForFinished(restarter.future());
+    Test::tick();
+
+    QCOMPARE(received, 99);
+    QCOMPARE(futureChanged.loadRelaxed(), 1);
+    QCOMPARE(deliveries.loadRelaxed(), 1);
+}
+
+void Spec::test_restarter_onResult_rapid_fire_delivers_latest_once() {
+    // Rapid restart() calls coalesce / supersede into a single logical run.
+    // onResult() must deliver exactly once, carrying the latest run's result —
+    // never once per superseded restart, and never a stale value.
+
+    QObject context;
+    Restarter<int> restarter(QCoreApplication::instance());
+
+    QAtomicInt deliveries(0);
+    int received = 0;
+
+    restarter.onResult(&context, [&](int value) {
+        received = value;
+        deliveries.fetchAndAddOrdered(1);
+    });
+
+    for (int i = 1; i <= 5; i++) {
+        restarter.restart([i]() -> QFuture<int> {
+            return QtConcurrent::run([i]() {
+                QThread::msleep(20);
+                return i;
+            });
+        });
+    }
+
+    QVERIFY(waitUntil([&]() {
+        return !restarter.future().isRunning()
+               && restarter.future().resultCount() > 0;
+    }, 5000));
+    Test::tick();
+
+    QCOMPARE(received, 5);
+    QCOMPARE(deliveries.loadRelaxed(), 1);
+}

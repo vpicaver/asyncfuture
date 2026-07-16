@@ -135,6 +135,13 @@ private slots:
     void test_restarter_outer_cancel_after_finished();
     void test_restarter_onFutureChanged_delivers_once();
     void test_restarter_chain_kicks_next_stage_once();
+    void test_restarter_onResult_delivers_once();
+    void test_restarter_onResult_skips_cancelled();
+    void test_restarter_onResult_skips_empty();
+    void test_restarter_onResult_void();
+    void test_restarter_onResult_context_destroyed();
+    void test_restarter_onResult_composes_with_onFutureChanged();
+    void test_restarter_onResult_rapid_fire_delivers_latest_once();
     void test_subscribe_qpromise_cancel_inner_loop();
     void test_context_qpromise_cancel_inner_loop();
 

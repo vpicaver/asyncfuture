@@ -1862,9 +1862,7 @@ public:
             if(!isQueuedStart) {
                 isQueuedStart = true;
                 outerDeferred = AsyncFuture::deferred<T>();
-                if(changedCallback) {
-                    changedCallback();
-                }
+                fireFutureChanged();
                 auto alive = m_alive;
                 if (context) {
                     QMetaObject::invokeMethod(context, [this, alive]() {
@@ -1893,9 +1891,7 @@ public:
                 // the burst-start path's outerDeferred reassignment.
                 if (outerDeferred.future().isFinished()) {
                     outerDeferred = AsyncFuture::deferred<T>();
-                    if (changedCallback) {
-                        changedCallback();
-                    }
+                    fireFutureChanged();
                 }
 
                 //Watch for when the Future is cancelled
@@ -1928,6 +1924,47 @@ public:
         this->changedCallback = changedCallback;
     }
 
+    // Encapsulates the onFutureChanged -> observe(future()).context() delivery
+    // pattern plus the standard cancel/empty guard, so consumers only supply
+    // the result-consumption body.
+    //
+    // `callback` fires exactly once per logical run, on `resultContext`'s
+    // thread, and only for a completed run whose outer future was neither
+    // cancelled nor empty. For a non-void T the callback receives the result
+    // (`callback(const T&)`); for T == void it takes no argument
+    // (`callback()`). It is never invoked after `resultContext` is destroyed.
+    //
+    // Composes with onFutureChanged(): a consumer that also registers the run
+    // with a future manager keeps a thin onFutureChanged() for that side, and
+    // both fire when a new future is installed.
+    template <typename Func>
+    void onResult(QObject* resultContext, Func callback) {
+        auto alive = m_alive;
+        resultCallback = [this, resultContext, callback, alive]() {
+            // Captured by value: this is exactly the future for the run being
+            // started, so a later restart() installing a new future never
+            // redirects an already-attached observer.
+            QFuture<T> runFuture = outerDeferred.future();
+            AsyncFuture::observe(runFuture).context(resultContext,
+                [callback, alive, runFuture]() {
+                    if (!*alive) {
+                        return;
+                    }
+                    if (runFuture.isCanceled()) {
+                        return;
+                    }
+                    if constexpr (std::is_same_v<T, void>) {
+                        callback();
+                    } else {
+                        if (runFuture.resultCount() == 0) {
+                            return;
+                        }
+                        callback(runFuture.result());
+                    }
+                });
+        };
+    }
+
     QFuture<T> future() const {
         return outerDeferred.future();
     }
@@ -1936,6 +1973,7 @@ private:
     std::shared_ptr<bool> m_alive = std::make_shared<bool>(true);
     std::function<QFuture<T> ()> currentRunFunction;
     std::function<void ()> changedCallback;
+    std::function<void ()> resultCallback;
     std::function<void()> pendingStart;
     QFuture<T> activeInner;
     Deferred<T> outerDeferred;
@@ -1944,6 +1982,19 @@ private:
     int generation = 0;
     bool isCancelling = false;
     bool isQueuedStart = false;
+
+    // Fires the consumer hooks that must run whenever a fresh outerDeferred is
+    // installed: the onFutureChanged() callback (future() now points at a new
+    // handle) and, if set, the onResult() wiring that attaches a fresh observer
+    // to that new future.
+    void fireFutureChanged() {
+        if (changedCallback) {
+            changedCallback();
+        }
+        if (resultCallback) {
+            resultCallback();
+        }
+    }
 
     void startRun() {
         QFuture<T> inner = currentRunFunction();
@@ -1994,7 +2045,17 @@ private:
             if constexpr (std::is_same_v<T, void>) {
                 outerDeferred.complete();
             } else {
-                outerDeferred.complete(future.result());
+                // A finished-but-empty inner (worker returned without producing
+                // a result) must complete the outer with zero results — not call
+                // future.result(), which reads out of bounds and crashes.
+                // complete(QFuture<T>) routes through completeByFinishedFuture,
+                // which maps zero results to an empty complete(); it is idempotent
+                // with the track() already installed in startRun().
+                if (future.resultCount() == 0) {
+                    outerDeferred.complete(future);
+                } else {
+                    outerDeferred.complete(future.result());
+                }
             }
         }
 

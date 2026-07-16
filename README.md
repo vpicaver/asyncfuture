@@ -815,6 +815,47 @@ connect(searchLineEdit, &QLineEdit::textChanged, this,
 * If the user types again before the request completes, the old request is cancelled (assuming your network layer supports cancellation) and a new one starts only once the cancellation is acknowledged.
 * displayResults() sees only the latest completed response.
 
+**Consuming the result: `onResult(context, callback)`**
+
+`onFutureChanged` fires when `future()` starts pointing at a *new* future — it does **not** hand you the settled value. The historical way to consume a result was to re-attach an observer inside the changed callback and re-derive a cancel/empty guard by hand:
+
+```c++
+restarter.onFutureChanged([&]() {
+    AsyncFuture::observe(restarter.future()).context(this, [&]() {
+        auto f = restarter.future();
+        if (f.isCanceled() || f.resultCount() == 0) return; // easy to forget / get wrong
+        consume(f.result());
+    });
+});
+```
+
+That two-step is exactly where a double-delivery bug can hide: re-attaching `observe(future()).context()` on every change, if the changed callback ever fires on mere *completion*, attaches a second observer to an already-finished future and delivers twice. `onResult` encapsulates the whole pattern — the `observe(future()).context()` wiring **and** the guard — so you only write the consumption body:
+
+```c++
+// Fires callback exactly once per logical run, on `context`'s thread, only for
+// a completed (non-cancelled, non-empty) outer future. Never fires after
+// `context` is destroyed.
+restarter.onResult(this, [this](const ResponseData& result) {
+    displayResults(result);   // cancel/empty already filtered out
+});
+```
+
+* **Non-void `T`** — the callback receives the result. Take it by `const&` if you only read it, or by value (`ResponseData result`) if you want a movable local you can `std::move` from — the delivered result is a prvalue, so by-value adds no copy over `const&`.
+* **`Restarter<void>`** — the callback takes no argument: `restarter.onResult(this, [this]() { ... });`.
+* **Guard** — a cancelled run (superseded by a newer `restart()`, or an explicit `future().cancel()`) and a finished-but-empty run (`resultCount() == 0`, e.g. a worker that returned without `addResult`) are both dropped before your callback runs.
+* **Lifetime** — delivery is bound to `context`. `onResult` captures each run's future by value, so a later `restart()` never redirects an already-attached observer, and the callback never touches a destroyed `Restarter`.
+
+`onResult` **composes with** `onFutureChanged`: keep a thin `onFutureChanged` for side work that must happen when the run *starts* (e.g. registering the job with a future manager) and let `onResult` handle delivery. Both fire when a fresh future is installed:
+
+```c++
+restarter.onFutureChanged([this]() {
+    m_futureManagerToken.addJob({ QFuture<void>(restarter.future()), "Loading…" });
+});
+restarter.onResult(this, [this](const ResponseData& result) {
+    applyResult(result);
+});
+```
+
 
 Cooperative cancellation inside a worker (QPromise)
 ---
