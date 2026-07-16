@@ -1536,6 +1536,10 @@ public:
         deferredFuture->complete(value);
     }
 
+    void complete() {
+        deferredFuture->complete();
+    }
+
     void complete(QList<T> value) {
         deferredFuture->complete(value);
     }
@@ -2047,12 +2051,12 @@ private:
             } else {
                 // A finished-but-empty inner (worker returned without producing
                 // a result) must complete the outer with zero results — not call
-                // future.result(), which reads out of bounds and crashes.
-                // complete(QFuture<T>) routes through completeByFinishedFuture,
-                // which maps zero results to an empty complete(); it is idempotent
-                // with the track() already installed in startRun().
+                // future.result(), which reads out of bounds and crashes. Use the
+                // no-arg complete() to finish with zero results directly; passing
+                // the future to complete(QFuture<T>) would redundantly re-install
+                // a second QFutureWatcher/track() on top of startRun()'s.
                 if (future.resultCount() == 0) {
-                    outerDeferred.complete(future);
+                    outerDeferred.complete();
                 } else {
                     outerDeferred.complete(future.result());
                 }
