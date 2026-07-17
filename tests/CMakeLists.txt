@@ -64,6 +64,7 @@ set(SOURCE_FILES
     asyncfutureunittests/testclass.cpp
     asyncfutureunittests/trackingdata.cpp
     asyncfutureunittests/spec.cpp
+    asyncfutureunittests/shieldtests.cpp
 )
 
 # Define the executable target
@@ -111,6 +112,7 @@ set(HEADERS
     asyncfutureunittests/cookbook.h
     asyncfutureunittests/trackingdata.h
     asyncfutureunittests/spec.h
+    asyncfutureunittests/shieldtests.h
     asyncfutureunittests/tools.h
 )
 

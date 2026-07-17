@@ -8,6 +8,7 @@
 #include "bugtests.h"
 #include "samplecode.h"
 #include "cookbook.h"
+#include "shieldtests.h"
 
 static void waitForFinished(QThreadPool *pool)
 {
@@ -28,6 +29,7 @@ int main(int argc, char *argv[])
     TestRunner runner;
     runner.add<Spec>();
     runner.add<BugTests>();
+    runner.add<ShieldTests>();
     runner.add<Example>();
     runner.add<SampleCode>();
     runner.add<Cookbook>();

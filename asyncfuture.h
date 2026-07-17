@@ -34,6 +34,18 @@ namespace AsyncFuture {
  * typename R - The return type of callback
  */
 
+/* Controls whether canceling the future of a Deferred completed with
+ * complete(QFuture) is pushed upstream to the observed future.
+ * Propagate is the historical default. Blocked is the shield()
+ * semantic: the Deferred's future stays cancelable (its observers
+ * stop), but the cancel is not forwarded to the observed future -
+ * upstream work continues and other observers of it are unaffected.
+ */
+enum class CancelPropagation {
+    Propagate,
+    Blocked
+};
+
 namespace Private {
 
 /* Begin traits functions */
@@ -561,7 +573,8 @@ public:
         this->complete();
     }
 
-    void complete(QFuture<T> future) {
+    void complete(QFuture<T> future,
+                  CancelPropagation cancelPropagation = CancelPropagation::Propagate) {
         auto strongRef = this->weakRef.toStrongRef();
         auto onFinished = [strongRef, future]() {
             strongRef->template completeByFinishedFuture<T>(future);
@@ -580,20 +593,22 @@ public:
         [](int,int){}
         );
 
-        auto pushCancel = [future]() {
-            auto tmpFuture = future;
-            tmpFuture.cancel();
-        };
+        if (cancelPropagation == CancelPropagation::Propagate) {
+            auto pushCancel = [future]() {
+                auto tmpFuture = future;
+                tmpFuture.cancel();
+            };
 
-        //Pushes cancel to child futures in the chain
-        watch(this->future(),
-              this,
-              nullptr,
-              [](){},
-              pushCancel,
-              [](int){},
-        [](int,int){}
-        );
+            //Pushes cancel to child futures in the chain
+            watch(this->future(),
+                  this,
+                  nullptr,
+                  [](){},
+                  pushCancel,
+                  [](int){},
+            [](int,int){}
+            );
+        }
 
         track(future);
     }
@@ -1527,8 +1542,9 @@ public:
         deferredFuture->complete(future);
     }
 
-    void complete(QFuture<T> future) {
-        deferredFuture->complete(future);
+    void complete(QFuture<T> future,
+                  CancelPropagation cancelPropagation = CancelPropagation::Propagate) {
+        deferredFuture->complete(future, cancelPropagation);
     }
 
     void complete(T value)
@@ -1590,8 +1606,9 @@ public:
         static_assert(Private::False<ANY>::value, "Deferred<void>::complete(QFuture<QFuture<ANY>>) is not supported");
     }
 
-    void complete(QFuture<void> future) {
-        deferredFuture->complete(future);
+    void complete(QFuture<void> future,
+                  CancelPropagation cancelPropagation = CancelPropagation::Propagate) {
+        deferredFuture->complete(future, cancelPropagation);
     }
 
     void complete() {
@@ -1736,6 +1753,20 @@ inline Observable<QVariant> observe(QObject *object,QString signal)  {
 template <typename T>
 auto deferred() -> Deferred<T> {
     return Deferred<T>();
+}
+
+/* Returns a future that forwards the input's completion, cancellation,
+ * and progress, but does not push a cancel of the returned future back
+ * to the input (same semantics as Python's asyncio.shield). Use it when
+ * handing a shared future to consumers, so one consumer's cancel()
+ * cannot poison the source for every other observer. The input stays
+ * directly cancelable by whoever holds it.
+ */
+template <typename T>
+QFuture<T> shield(QFuture<T> future) {
+    Deferred<T> defer;
+    defer.complete(future, CancelPropagation::Blocked);
+    return defer.future();
 }
 
 inline Combinator combine(CombinatorMode mode = FailFast) {

@@ -356,6 +356,26 @@ d.complete(true); // or d.cancel();
 
 See [`Deferred<T>`](#deferredt)
 
+AsyncFuture::shield(QFuture&lt;T&gt; future)
+----------
+
+The shield() function returns a future that forwards the input's completion, cancellation, and progress, but does not push a cancel of the returned future back to the input — the same semantics as Python's `asyncio.shield`. The input future stays directly cancelable by whoever holds it; shield only stops cancellation from arriving through the returned handle.
+
+Use it when handing a shared future to multiple consumers, so one consumer's `cancel()` cannot poison the source for every other observer:
+
+```c++
+QFuture<void> Queue::drained() {
+    // Consumers may cancel their copy freely; the shared m_drainDeferred
+    // future underneath is untouched and other observers still complete.
+    return AsyncFuture::shield(m_drainDeferred.future());
+}
+
+auto future = queue->drained();
+future.cancel();   // this consumer stops observing; the queue keeps draining
+```
+
+It is a convenience wrapper over `Deferred<T>::complete(future, CancelPropagation::Blocked)`. See [`Deferred<T>`](#deferredt)
+
 ![AsyncFuture Class Diagram](https://raw.githubusercontent.com/benlau/junkcode/master/docs/AsyncFuture%20Class%20Diagram.png)
 
 Observable&lt;T&gt;
@@ -557,9 +577,11 @@ Complete this future object with the given arguments
 
 Complete the future object with a list of result. User may obtain all the value by QFuture::results().
 
-**Deferred&lt;T&gt;::complete(QFuture&lt;T&gt;)**
+**Deferred&lt;T&gt;::complete(QFuture&lt;T&gt;, CancelPropagation cancelPropagation = CancelPropagation::Propagate)**
 
 This future object is deferred to complete/cancel. It will track the state from the input future. If the input future is completed, then it will be completed too. That is same for cancel.
+
+By default, canceling this deferred's future is also pushed upstream to the input future (`CancelPropagation::Propagate`). Pass `CancelPropagation::Blocked` to keep the forwarding one-way: this deferred's future stays cancelable, but the cancel is not forwarded to the input, so upstream work continues and other observers of a shared input future are unaffected. `AsyncFuture::shield()` is a convenience wrapper for the Blocked policy.
 
 
 **Deferred&lt;T&gt;::cancel()**
