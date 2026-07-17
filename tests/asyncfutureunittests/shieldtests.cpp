@@ -117,25 +117,33 @@ void ShieldTests::test_shield_forwards_progress()
 
 void ShieldTests::test_shield_thread_hop()
 {
-    auto inner = QtConcurrent::run([]() {
+    QThread* innerThread = nullptr;
+    auto inner = QtConcurrent::run([&innerThread]() {
+        innerThread = QThread::currentThread();
         Automator::wait(50);
         return 99;
     });
 
     auto shielded = shield(inner);
 
-    bool onMainThread = false;
-    Callable<int> observer;
-    observe(shielded).subscribe([&](int value) {
-        onMainThread = QThread::currentThread() == QCoreApplication::instance()->thread();
-        observer.func(value);
+    // A Sync continuation runs on whichever thread completes the future,
+    // so this records shield's own delivery thread - the forwarder
+    // watcher living on the shield() caller's thread - rather than an
+    // observer's marshalling, which would land on the main thread even
+    // if shield delivered from the pool.
+    QThread* deliveryThread = nullptr;
+    auto recorded = shielded.then(QtFuture::Launch::Sync, [&deliveryThread](int value) {
+        deliveryThread = QThread::currentThread();
+        return value;
     });
 
     QVERIFY(waitUntil([&]() {
-        return observer.called;
+        return recorded.isFinished();
     }, 5000));
-    QCOMPARE(observer.value, 99);
-    QVERIFY(onMainThread);
+    QCOMPARE(recorded.result(), 99);
+    QVERIFY(innerThread != nullptr);
+    QVERIFY(innerThread != QCoreApplication::instance()->thread());
+    QCOMPARE(deliveryThread, QCoreApplication::instance()->thread());
 }
 
 void ShieldTests::test_complete_policy_parity()
