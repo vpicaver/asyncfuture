@@ -9,6 +9,7 @@
 #include "samplecode.h"
 #include "cookbook.h"
 #include "shieldtests.h"
+#include "settledtests.h"
 
 static void waitForFinished(QThreadPool *pool)
 {
@@ -30,6 +31,7 @@ int main(int argc, char *argv[])
     runner.add<Spec>();
     runner.add<BugTests>();
     runner.add<ShieldTests>();
+    runner.add<SettledTests>();
     runner.add<Example>();
     runner.add<SampleCode>();
     runner.add<Cookbook>();

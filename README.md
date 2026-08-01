@@ -337,6 +337,43 @@ QFuture<QImage> result = (combine(AllSettled) << f1 << defer).subscribe([=](){
 }).future();
 ```
 
+Because a Combinator stays open for more `<<` inputs, it cannot settle until it has been through the event loop, even when every input handed to it has already finished. If the input set is known up front, use the fixed-set form below instead.
+
+AsyncFuture::combine(fixed set, CombinatorMode mode = FailFast)
+------------
+
+```c++
+Observable<void> combine(std::initializer_list<QFuture<void>> futures, CombinatorMode mode = FailFast);
+
+template <typename T>
+Observable<void> combine(const QList<QFuture<T>>& futures, CombinatorMode mode = FailFast);
+```
+
+These overloads join a set of futures that is closed on return. Cancellation, progress and `CombinatorMode` behave exactly as they do for `combine() << f`; the difference is that the set cannot grow afterwards, so inputs that have already finished are settled inline and a fully finished set joins without an event loop turn.
+
+```c++
+auto joined = combine({leftJob, rightJob});
+
+// If both jobs were already finished - a cache hit, or a node whose
+// dependencies were all satisfied earlier - this is already true here,
+// with no trip through the event loop.
+joined.future().isFinished();
+
+joined.context(this, [=]() {
+    // Callbacks are still delivered asynchronously, as always.
+});
+```
+
+The gain compounds in a dependency graph: a chain of `Deferred::complete()` and `combine({...})` over work that is already done settles end to end in one turn rather than one turn per level.
+
+They return an `Observable<void>` rather than a `Combinator`, so `<<` is a compile error on the result — the set is sealed, and an input added after the join settled would be silently ignored:
+
+```c++
+combine({f1, f2}) << f3;   // error: invalid operands to binary expression
+```
+
+The empty set completes immediately, on the grounds that a join over no dependencies is a satisfied precondition. Note this differs from `combine() << QList<QFuture<void>>()`, which cancels.
+
 AsyncFuture::deferred&lt;T&gt;()
 ----------
 
@@ -581,7 +618,50 @@ Complete the future object with a list of result. User may obtain all the value 
 
 This future object is deferred to complete/cancel. It will track the state from the input future. If the input future is completed, then it will be completed too. That is same for cancel.
 
+If the input future has already finished and this is called from the main thread, the deferred settles in the same event loop turn instead of waiting on a `QFutureWatcher`. Only the deferred's own state moves early — AsyncFuture observers (`observe()`, `context()`, `subscribe()`) always own a watcher, so their callbacks are still delivered asynchronously.
+
+A Qt-native `QFuture::then()` continuation behaves the other way around: `reportFinished()` drives Qt's continuation chain on the calling thread, so it runs before `complete()` returns. A context object does not change this — `then(context, f)` uses `AutoConnection`, which is a direct call when the deferred settles on the context's own thread. This is not new: `complete(value)` has always settled synchronously and always ran such continuations inline. What changed is that `complete(finishedFuture)` now does the same, rather than deferring them by one turn.
+
+Settling immediately also closes the deferred's write window immediately, where previously it stayed open for one event loop turn. Every "second writer" that used to win that race is now a no-op:
+
+```c++
+defer.complete(finishedFuture);
+defer.complete(42);                // used to overwrite; now ignored, result stays that of finishedFuture
+```
+
+This is the same rule as `complete(value)`, which has always refused a second write. The cancel-propagation section below covers the one remaining face of it.
+
+The most visible face of this is `Deferred<T>::cancel()`, which has always been a no-op once the future has settled — the guard exists because a retroactive cancel makes every observer downstream drop its callback and its results. Previously `complete(finishedFuture)` left a window in which the deferred had not settled yet, so an immediately following `cancel()` slipped past that guard and canceled. It only did so if the event loop had not run in between, which made it a race rather than a contract:
+
+```c++
+defer.complete(finishedFuture);
+defer.cancel();                    // used to cancel; now a no-op, as after complete(value)
+
+defer.complete(finishedFuture);
+qApp->processEvents();
+defer.cancel();                    // was already a no-op, before and after
+```
+
+Canceling the `QFuture` handle rather than the Deferred is unaffected and still follows Qt, where canceling a finished future does set `isCanceled()`:
+
+```c++
+defer.complete(finishedFuture);
+auto future = defer.future();
+future.cancel();
+future.isCanceled();               // true, on Qt's own semantics
+```
+
 By default, canceling this deferred's future is also pushed upstream to the input future (`CancelPropagation::Propagate`). Pass `CancelPropagation::Blocked` to keep the forwarding one-way: this deferred's future stays cancelable, but the cancel is not forwarded to the input, so upstream work continues and other observers of a shared input future are unaffected. `AsyncFuture::shield()` is a convenience wrapper for the Blocked policy.
+
+Propagation applies to inputs that are still running. An input that had **already finished** when it was passed to `complete()` is never marked canceled after the fact:
+
+```c++
+defer.complete(finishedFuture);    // Propagate, the default
+defer.future().cancel();
+finishedFuture.isCanceled();       // false; was true before the fast path
+```
+
+`Propagate` and `Blocked` are therefore indistinguishable for an already-finished input. This matters because Qt's `cancel()` does set the flag on a finished future, so the old behavior reached back and marked completed upstream work as canceled — poisoning it for every other observer of that shared future, which is the same hazard `shield()` exists to prevent. There is nothing left to stop in a future that has already finished, so nothing is propagated.
 
 
 **Deferred&lt;T&gt;::cancel()**

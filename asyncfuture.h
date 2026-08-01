@@ -575,6 +575,34 @@ public:
 
     void complete(QFuture<T> future,
                   CancelPropagation cancelPropagation = CancelPropagation::Propagate) {
+        // An already settled input needs no watcher, and installing one would cost a
+        // full event loop turn before this deferred settles. Gated on the main thread
+        // so the thread this reports from is unchanged - watch() would have moved its
+        // watcher there anyway. Only this deferred's own state settles early; every
+        // AsyncFuture observer still owns a watcher, so their callbacks stay
+        // asynchronous. A Qt-native QFuture::then() does not - reportFinished()
+        // drives Qt's own continuation chain on this thread, exactly as it already
+        // did for the synchronous complete(value).
+        if (future.isFinished() &&
+            QThread::currentThread() == QCoreApplication::instance()->thread()) {
+            // track() below mirrors the input's progress and started state on every
+            // path, canceled inputs included, so mirror before settling rather than
+            // inside the completed branch.
+            setWatchProgressRange(future.progressMinimum(), future.progressMaximum());
+            setWatchProgressValue(future.progressValue());
+
+            if (future.isStarted()) {
+                QFutureInterface<T>::reportStarted();
+            }
+
+            if (future.isCanceled()) {
+                this->cancel();
+            } else {
+                this->template completeByFinishedFuture<T>(future);
+            }
+            return;
+        }
+
         auto strongRef = this->weakRef.toStrongRef();
         auto onFinished = [strongRef, future]() {
             strongRef->template completeByFinishedFuture<T>(future);
@@ -806,11 +834,12 @@ protected:
 class CombinedFuture: public DeferredFuture<void> {
 
 public:
-    CombinedFuture(bool settleAllModeArg = false) : DeferredFuture<void>(),
+    CombinedFuture(bool settleAllModeArg = false, bool sealedArg = true) : DeferredFuture<void>(),
         settledCount(0),
         count(0),
         anyCanceled(false),
-        settleAllMode(settleAllModeArg)
+        settleAllMode(settleAllModeArg),
+        sealed(sealedArg)
     {
         //Cancel all sub futures if this future is cancelled
         Private::watch(
@@ -874,9 +903,28 @@ public:
             mutex.unlock();
         };
 
+        // setProgressRange() resets the reported value to the minimum, discarding what
+        // an inline settled input already contributed. Restore it, the same way
+        // DeferredFuture::updateProgressRanges() does for the same reason.
+        const int reportedProgress = QFutureInterface<void>::progressValue();
         QFutureInterface<void>::setProgressRange(0, progressMaximum() + info->max);
+        QFutureInterface<void>::setProgressValue(reportedProgress);
+
+        const bool inputSetClosed = sealed;
         mutex.unlock();
 
+        // Settling an already finished input inline is only safe while the input set
+        // is still open. A sealed combinator is the incremental combine() << f form,
+        // where settling input N now would fulfil the join before input N+1 is added.
+        if (!inputSetClosed && future.isFinished() &&
+            QThread::currentThread() == QCoreApplication::instance()->thread()) {
+            if (future.isCanceled()) {
+                cancelFutureAt(index);
+            } else {
+                completeFutureAt(index);
+            }
+            return;
+        }
 
         auto strongRef = this->weakRef.toStrongRef();
         Private::watch(future, this, 0,
@@ -890,12 +938,26 @@ public:
         );
     }
 
-    static QSharedPointer<CombinedFuture> create(bool settleAllMode) {
+    /// Closes the input set. Call once every addFuture() is done; until then the
+    /// combinator refuses to settle, since the input count is not yet final.
+    void seal() {
+        mutex.lock();
+        if (sealed) {
+            mutex.unlock();
+            return;
+        }
+        sealed = true;
+        mutex.unlock();
+
+        checkFulfilled();
+    }
+
+    static QSharedPointer<CombinedFuture> create(bool settleAllMode, bool sealed = true) {
         auto deleter = [](CombinedFuture *object) {
             object->cancel();
             object->deleteLater();
         };
-        QSharedPointer<CombinedFuture> ptr(new CombinedFuture(settleAllMode), deleter);
+        QSharedPointer<CombinedFuture> ptr(new CombinedFuture(settleAllMode, sealed), deleter);
         ptr->weakRef = ptr.toWeakRef();
         return ptr;
     }
@@ -918,6 +980,7 @@ private:
     int count;
     bool anyCanceled;
     bool settleAllMode;
+    bool sealed;
     QVector<FutureInfo*> futures;
 
     void completeFutureAt(int index) {
@@ -942,17 +1005,33 @@ private:
     }
 
     void checkFulfilled() {
+        // seal() can run on any thread while the input watchers settle on the main
+        // one, so snapshot under the mutex rather than reading these across threads.
+        // cancel()/complete() then run unlocked, as the callouts they trigger are
+        // posted and the cancel-children watcher takes this same mutex.
+        mutex.lock();
+        const bool inputSetClosed = sealed;
+        const bool everySettled = settledCount == count;
+        const bool canceledAny = anyCanceled;
+        mutex.unlock();
+
+        // Still open for addFuture(), so the input count is not final and settling
+        // now could fulfil the join on a prefix of the inputs.
+        if (!inputSetClosed) {
+            return;
+        }
+
         if (isFinished()) {
             return;
         }
 
-        if (anyCanceled && !settleAllMode) {
+        if (canceledAny && !settleAllMode) {
             cancel();
             return;
         }
 
-        if (settledCount == count) {
-            if (anyCanceled) {
+        if (everySettled) {
+            if (canceledAny) {
                 cancel();
             } else {
                 complete();
@@ -1773,6 +1852,38 @@ inline Combinator combine(CombinatorMode mode = FailFast) {
     return Combinator(mode);
 }
 
+namespace Private {
+
+template <typename Container>
+inline Observable<void> combineSealed(const Container& futures, CombinatorMode mode) {
+    // The whole input set is known before anything is allowed to settle, so an input
+    // that has already finished can settle inline instead of waiting on a watcher.
+    auto combined = CombinedFuture::create(mode == AllSettled, false);
+    QFuture<void> future = combined->future();
+
+    for (const auto& child : futures) {
+        combined->addFuture(child);
+    }
+    combined->seal();
+
+    return Observable<void>(future);
+}
+
+} // namespace Private
+
+/// Join a fixed set of futures. Unlike combine() << f, the set is closed on return,
+/// so inputs that have already finished join without an event loop turn. An empty
+/// set completes immediately (combine() << QList<QFuture<void>>() cancels instead).
+inline Observable<void> combine(std::initializer_list<QFuture<void>> futures,
+                                CombinatorMode mode = FailFast) {
+    return Private::combineSealed(futures, mode);
+}
+
+template <typename T>
+inline Observable<void> combine(const QList<QFuture<T>>& futures,
+                                CombinatorMode mode = FailFast) {
+    return Private::combineSealed(futures, mode);
+}
 
 inline QFuture<void> completed() {
    QFutureInterface<void> fi;
