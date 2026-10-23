@@ -970,15 +970,16 @@ auto run = limited(this, inputs,
 for (const QFuture<Result>& item : run.items) {
     observe(item).context(this, [this](const Result& result) { deliver(result); });
 }
-// run.all.cancel() stops admission and cancels every item.
+// run.cancel() stops admission and cancels every item.
 ```
 
 * **`items`** — one future per input, in input order. Each exists before its input is admitted, so it can be observed right away; admission completes it with the launched future through `Deferred<T>::complete(future, CancelPropagation::Propagate)`, so canceling an admitted item cancels the launched work.
-* **`all`** — completes once every item is skipped or its launched future has finished. Canceling it cancels the running items and every queued one, and admits nothing more.
+* **`all`** — settles once every item is skipped or its launched future has finished: completed when the run ran to the end, canceled when it was stopped. When it settles, every worker has exited and every ledger charge is back.
+* **`cancel()`** — stops the run: admits nothing more and cancels every item. Safe on any copy of `Limited` and after the run completes; call it from `context`'s thread.
 * **First item always runs** — when nothing is running, the next item is admitted whatever its weight, so an item heavier than the whole budget still runs, alone.
 * **Skipping** — canceling one item's future before its turn skips it.
-* **Cancel** — canceling an item, `all`, or destroying `context` cancels the item's future at once. Its running slot, weight, and ledger charge return only when the launched future reports finished. A canceled `QPromise` or `QtConcurrent` future finishes when its worker exits, so a canceled item keeps its share, and still blocks admission, until the worker is gone. When only an item is canceled, `all` completes after that item's launched future finishes. Canceling `all` or destroying `context` cancels `all` at once, and the still-running workers return their slots and ledger charges as they exit, so `all.isFinished()` there means the run stopped, while workers may still hold memory.
-* **Lifetime** — destroying `context` cancels every item and `all`.
+* **Cancel** — canceling an item cancels its future at once, but its slot, weight, and ledger charge return only when the launched future finishes; a canceled `QPromise` or `QtConcurrent` future finishes when its worker exits.
+* **Stop** — `cancel()` or destroying `context` cancels every item at once and cancels `all` after the last running worker exits. Use `cancel()` rather than `all.cancel()`: the run drains the same way, but a direct `all.cancel()` notifies observers of `all` before the workers have exited.
 * **`Limit::budget` zero or negative** — counts items only; `weight` is still called but never blocks admission.
 * **Deduced `T`** — the result type comes from the launcher's `QFuture<T>`, so no template argument is needed. A launcher that returns anything other than a `QFuture` fails to compile with a `static_assert`.
 * **Count-only overload** — `limited(this, inputs, launch, Limit{2})` drops `weight`. Every item then weighs one, so `Limit::budget` and `Limit::ledger` count items. `Limit` is always the last argument, so a weight lambda with no `Limit` fails to compile.

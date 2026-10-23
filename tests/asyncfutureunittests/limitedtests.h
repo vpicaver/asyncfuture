@@ -26,7 +26,12 @@ private slots:
     void test_cancel_keeps_ledger_until_launched_future_finishes();
     void test_context_destruction_keeps_ledger_until_launched_future_finishes();
     void test_all_waits_for_canceled_item_to_finish();
-    void test_cancel_all_settles_at_once_and_keeps_ledger_until_finished();
+    void test_cancel_settles_all_only_after_workers_exit();
+    void test_context_destruction_settles_all_only_after_workers_exit();
+    void test_all_completes_when_run_finishes_normally();
+    void test_direct_all_cancel_still_drains();
+    void test_cancel_is_safe_on_a_copy_and_after_completion();
+    void test_cancel_from_inside_launcher_waits_for_launched_worker();
     void test_two_runs_share_one_ledger();
     void test_ledger_first_item_charged_past_cap();
     void test_empty_inputs();
