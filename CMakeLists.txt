@@ -11,6 +11,7 @@ add_library(asyncfuture STATIC
 )
 set_target_properties(asyncfuture PROPERTIES AUTOMOC ON)
 target_link_libraries(asyncfuture PUBLIC Qt6::Core)
+target_compile_features(asyncfuture PUBLIC cxx_std_17)
 target_include_directories(asyncfuture PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}>
     $<INSTALL_INTERFACE:include>)
