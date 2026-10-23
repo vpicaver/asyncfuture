@@ -2247,10 +2247,32 @@ struct ResetFlag {
     bool& flag;
     ~ResetFlag() { flag = false; }
 };
+
+/* Calls onFinished once future reports finished. A cancel alone is ignored: a
+ * canceled QPromise or QtConcurrent future finishes only when its worker exits.
+ * With a context, the watcher is the context's child, so the call runs on the
+ * context's thread and is dropped when the context dies first. Without one, the
+ * call runs on the main thread.
+ */
+template <typename T, typename Finished>
+void whenFinished(const QFuture<T>& future, QObject* context, Finished onFinished)
+{
+    auto* watcher = new QFutureWatcher<T>(context);
+    QObject::connect(watcher, &QFutureWatcher<T>::finished, watcher,
+                     [watcher, onFinished = std::move(onFinished)]() mutable {
+        watcher->disconnect();
+        watcher->deleteLater();
+        onFinished();
+    });
+    if (context == nullptr && QThread::currentThread() != QCoreApplication::instance()->thread()) {
+        watcher->moveToThread(QCoreApplication::instance()->thread());
+    }
+    watcher->setFuture(future);
+}
 } // namespace Private
 
 /* A process-wide byte ledger that limited() charges on admission and releases
- * when the item settles. Implementations must be thread-safe: several contexts,
+ * when the item's launched future finishes. Implementations must be thread-safe: several contexts,
  * possibly on different threads, share one ledger. The ledger must outlive every
  * limited() run that uses it; the application owns it, and Limit::ledger is a
  * non-owning pointer.
@@ -2308,7 +2330,9 @@ template <typename T>
 struct Limited {
     // One per input, in input order, observable before admission.
     QList<QFuture<T>> items;
-    // Settles when every item settles. Canceling it stops admission and cancels every item.
+    // Completes once every item is skipped or its launched future has finished.
+    // Canceling it stops admission and cancels every item at once; running workers
+    // return their share as they exit.
     QFuture<void> all;
 };
 
@@ -2317,8 +2341,15 @@ struct Limited {
  * positive, the summed weight of the running items plus its own fits the budget.
  * The first item of a window always runs, so an item heavier than the whole budget
  * runs alone. launch is called only on admission, on the context's thread, so a
- * queued input stays the cheap Input value. When an item settles its weight is
- * returned and the next items are admitted.
+ * queued input stays the cheap Input value.
+ *
+ * An admitted item holds its running slot, its weight and its ledger charge until
+ * the future launch returned reports finished, then the next items are admitted.
+ * Canceling the item, all, or destroying the context cancels the item's future at
+ * once, but a canceled QPromise or QtConcurrent future finishes only when its
+ * worker exits, so the item keeps its share until then. Canceling one item delays
+ * all until that worker exits; canceling all or destroying the context cancels all
+ * at once while the workers still hold their shares.
  *
  * Canceling an item's future before admission skips it. Destroying the context
  * cancels every item and all.
@@ -2338,6 +2369,7 @@ auto limited(QObject* context, const QList<Input>& inputs,
         QObject* context = nullptr;
         QList<Input> inputs;
         QList<Deferred<T>> deferreds;
+        QList<QFuture<T>> launchedFutures; // per input, set on admission
         QList<qint64> ledgerCharges; // per input, the bytes the ledger holds for it
         QList<qint64> weights; // per input, valid where isWeighed is true
         QList<bool> isWeighed;
@@ -2357,6 +2389,7 @@ auto limited(QObject* context, const QList<Input>& inputs,
             context(context),
             inputs(inputs),
             deferreds(inputs.size()),
+            launchedFutures(inputs.size()),
             ledgerCharges(inputs.size(), 0),
             weights(inputs.size(), 0),
             isWeighed(inputs.size(), false),
@@ -2450,13 +2483,13 @@ auto limited(QObject* context, const QList<Input>& inputs,
                 ++next;
                 ++running;
                 inFlight += itemWeight;
+                launchedFutures.replace(index, launched);
 
                 deferred.complete(launched, CancelPropagation::Propagate);
 
-                auto onSettled = [self = this->shared_from_this(), index, itemWeight]() {
+                Private::whenFinished(launched, context, [self = this->shared_from_this(), index, itemWeight]() {
                     self->release(index, itemWeight);
-                };
-                observe(deferred.future()).context(context, onSettled, onSettled);
+                });
             }
         }
 
@@ -2501,12 +2534,13 @@ auto limited(QObject* context, const QList<Input>& inputs,
 
     state->onContextDestroyed = QObject::connect(context, &QObject::destroyed, context, [state]() {
         state->cancelEverything();
-        // The context-bound settle callbacks never run now, so the process-wide
-        // ledger gets its bytes back when each running item settles.
+        // The context-bound callbacks never run now, so the process-wide ledger
+        // gets its bytes back when each running item's launched work finishes.
         for (int i = 0; i < state->ledgerCharges.size(); ++i) {
             if (state->ledgerCharges.at(i) > 0) {
-                auto onSettled = [state, i]() { state->releaseLedger(i); };
-                observe(state->deferreds.at(i).future()).subscribe(onSettled, onSettled);
+                Private::whenFinished(state->launchedFutures.at(i), nullptr, [state, i]() {
+                    state->releaseLedger(i);
+                });
             }
         }
     });

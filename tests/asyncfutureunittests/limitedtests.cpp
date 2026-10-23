@@ -1,4 +1,7 @@
 #include <QTest>
+#include <QPromise>
+#include <memory>
+#include <vector>
 #include <numeric>
 #include <Automator>
 #include <asyncfuture.h>
@@ -123,6 +126,52 @@ public:
     int forcedChargeCount = 0;
     int releaseCount = 0;
     int refusedCount = 0;
+};
+
+// Launches one QPromise per admitted input, so the launched future stays
+// unfinished after a cancel until the test finishes it, as a worker would.
+class PromiseLauncher {
+public:
+    QList<int> order;
+    std::vector<std::unique_ptr<QPromise<int>>> promises;
+    QList<qint64> weights;
+
+    std::function<QFuture<int>(int)> launch()
+    {
+        return [this](int input) {
+            auto promise = std::make_unique<QPromise<int>>();
+            promise->start();
+            QFuture<int> future = promise->future();
+            order.append(input);
+            promises.push_back(std::move(promise));
+            return future;
+        };
+    }
+
+    std::function<qint64(int)> weight() const
+    {
+        return [this](int input) { return weights.at(input); };
+    }
+
+    QFuture<int> launched(int input) const
+    {
+        return promises.at(order.indexOf(input))->future();
+    }
+
+    // Ends the worker for input without a result, as a canceled worker exits.
+    void finish(int input)
+    {
+        promises.at(order.indexOf(input))->finish();
+        tick();
+    }
+
+    void complete(int input)
+    {
+        QPromise<int>& promise = *promises.at(order.indexOf(input));
+        promise.addResult(input + kResultOffset);
+        promise.finish();
+        tick();
+    }
 };
 
 // Declared right after a ledger, so a test that fails with items still
@@ -408,9 +457,13 @@ void LimitedTests::test_all_finishes_after_last_item()
     tick();
     QCOMPARE(launcher.order.size(), kOneAtATime);
 
-    // A canceled item counts as settled, and all waits for the rest.
+    // A canceled item holds its slot until its launched work finishes, then
+    // counts as settled, and all waits for the rest.
     launcher.launched.at(0).future().cancel();
     tick();
+    QCOMPARE(launcher.order.size(), kOneAtATime);
+
+    launcher.complete(0);
     QVERIFY(waitUntil([&]() { return launcher.order.size() == 2; }, kTimeoutMs));
     QVERIFY(!isSettled(limitedRun.all));
 
@@ -478,6 +531,11 @@ void LimitedTests::test_cancel_admitted_item_propagates_and_frees_slot()
     running.cancel();
 
     QVERIFY(waitUntil([&]() { return launcher.launched.at(0).future().isCanceled(); }, kTimeoutMs));
+    tick();
+    QCOMPARE(launcher.order, QList<int>({0}));
+
+    // The slot frees once the canceled launched work finishes.
+    launcher.complete(0);
     QVERIFY(waitUntil([&]() { return launcher.order.size() == itemCount; }, kTimeoutMs));
     QCOMPARE(launcher.order, QList<int>({0, 1}));
 
@@ -508,15 +566,160 @@ void LimitedTests::test_ledger_released_on_context_destruction()
     QCOMPARE(ledger.charged, itemCount * itemWeight);
 
     context.reset();
-    tick();
+
+    for (int input = 0; input < itemCount; ++input) {
+        const QFuture<int> launched = launcher.launched.at(input).future();
+        QVERIFY(waitUntil([&]() { return launched.isCanceled(); }, kTimeoutMs));
+        QVERIFY(!launched.isFinished());
+    }
 
     for (int input = 0; input < itemCount; ++input) {
         launcher.complete(input);
+        QVERIFY(launcher.launched.at(input).future().isFinished());
     }
-
     QVERIFY(waitUntil([&]() { return ledger.releaseCount == itemCount; }, kTimeoutMs));
     QCOMPARE(ledger.charged, qint64(0));
     QVERIFY(waitUntil([&]() { return limitedRun.all.isCanceled(); }, kTimeoutMs));
+}
+
+void LimitedTests::test_cancel_keeps_ledger_until_launched_future_finishes()
+{
+    constexpr qint64 firstWeight = 3;
+    constexpr qint64 secondWeight = 5;
+    constexpr qint64 ledgerCap = 100;
+
+    ByteLedger ledger(ledgerCap);
+    DrainEventsOnExit drainBeforeLedgerDies;
+    PromiseLauncher launcher;
+    launcher.weights = {firstWeight, secondWeight};
+    QObject context;
+
+    auto limitedRun = limited(&context, inputRange(launcher.weights.size()),
+                              launcher.launch(), launcher.weight(),
+                              Limit{kOneAtATime, kCountOnly, &ledger});
+    tick();
+    QCOMPARE(launcher.order, QList<int>({0}));
+    QCOMPARE(ledger.charged(), firstWeight);
+
+    QFuture<int> first = limitedRun.items.at(0);
+    first.cancel();
+    QVERIFY(first.isCanceled());
+
+    tick();
+    QVERIFY(launcher.launched(0).isCanceled());
+    QVERIFY(!launcher.launched(0).isFinished());
+    QCOMPARE(ledger.charged(), firstWeight);
+    QCOMPARE(launcher.order, QList<int>({0}));
+
+    launcher.finish(0);
+    QVERIFY(waitUntil([&]() { return launcher.order.size() == 2; }, kTimeoutMs));
+    QCOMPARE(launcher.order, QList<int>({0, 1}));
+    QCOMPARE(ledger.charged(), secondWeight);
+
+    launcher.complete(1);
+    QVERIFY(waitUntil(limitedRun.all, kTimeoutMs));
+    QVERIFY(!limitedRun.all.isCanceled());
+    QCOMPARE(limitedRun.items.at(1).result(), 1 + kResultOffset);
+    QCOMPARE(ledger.charged(), qint64(0));
+}
+
+void LimitedTests::test_context_destruction_keeps_ledger_until_launched_future_finishes()
+{
+    constexpr qint64 firstWeight = 3;
+    constexpr qint64 secondWeight = 5;
+    constexpr qint64 ledgerCap = 100;
+
+    ByteLedger ledger(ledgerCap);
+    DrainEventsOnExit drainBeforeLedgerDies;
+    PromiseLauncher launcher;
+    launcher.weights = {firstWeight, secondWeight};
+    auto context = std::make_unique<QObject>();
+
+    auto limitedRun = limited(context.get(), inputRange(launcher.weights.size()),
+                              launcher.launch(), launcher.weight(),
+                              Limit{kOneAtATime, kCountOnly, &ledger});
+    tick();
+    QCOMPARE(launcher.order, QList<int>({0}));
+    QCOMPARE(ledger.charged(), firstWeight);
+
+    context.reset();
+    QVERIFY(limitedRun.items.at(0).isCanceled());
+
+    tick();
+    QVERIFY(launcher.launched(0).isCanceled());
+    QVERIFY(!launcher.launched(0).isFinished());
+    QCOMPARE(ledger.charged(), firstWeight);
+
+    launcher.finish(0);
+    QVERIFY(waitUntil([&]() { return ledger.charged() == 0; }, kTimeoutMs));
+    QVERIFY(waitUntil([&]() { return limitedRun.all.isCanceled(); }, kTimeoutMs));
+    QVERIFY(limitedRun.items.at(1).isCanceled());
+    QCOMPARE(launcher.order, QList<int>({0}));
+}
+
+void LimitedTests::test_all_waits_for_canceled_item_to_finish()
+{
+    constexpr qint64 itemWeight = 3;
+    constexpr qint64 ledgerCap = 100;
+
+    ByteLedger ledger(ledgerCap);
+    DrainEventsOnExit drainBeforeLedgerDies;
+    PromiseLauncher launcher;
+    launcher.weights = {itemWeight};
+    QObject context;
+
+    auto limitedRun = limited(&context, inputRange(launcher.weights.size()),
+                              launcher.launch(), launcher.weight(),
+                              Limit{kOneAtATime, kCountOnly, &ledger});
+    tick();
+    QCOMPARE(launcher.order, QList<int>({0}));
+
+    QFuture<int> item = limitedRun.items.at(0);
+    item.cancel();
+    QVERIFY(item.isCanceled());
+
+    tick();
+    QVERIFY(item.isFinished());
+    QVERIFY(!launcher.launched(0).isFinished());
+    QVERIFY(!limitedRun.all.isFinished());
+
+    launcher.finish(0);
+    QVERIFY(waitUntil(limitedRun.all, kTimeoutMs));
+    QVERIFY(!limitedRun.all.isCanceled());
+    QCOMPARE(ledger.charged(), qint64(0));
+}
+
+void LimitedTests::test_cancel_all_settles_at_once_and_keeps_ledger_until_finished()
+{
+    constexpr qint64 firstWeight = 3;
+    constexpr qint64 secondWeight = 5;
+    constexpr qint64 ledgerCap = 100;
+
+    ByteLedger ledger(ledgerCap);
+    DrainEventsOnExit drainBeforeLedgerDies;
+    PromiseLauncher launcher;
+    launcher.weights = {firstWeight, secondWeight};
+    QObject context;
+
+    auto limitedRun = limited(&context, inputRange(launcher.weights.size()),
+                              launcher.launch(), launcher.weight(),
+                              Limit{kOneAtATime, kCountOnly, &ledger});
+    tick();
+    QCOMPARE(launcher.order, QList<int>({0}));
+
+    limitedRun.all.cancel();
+    QVERIFY(limitedRun.all.isCanceled());
+
+    tick();
+    QVERIFY(limitedRun.all.isFinished());
+    QVERIFY(launcher.launched(0).isCanceled());
+    QVERIFY(!launcher.launched(0).isFinished());
+    QVERIFY(limitedRun.items.at(1).isCanceled());
+    QCOMPARE(ledger.charged(), firstWeight);
+
+    launcher.finish(0);
+    QVERIFY(waitUntil([&]() { return ledger.charged() == 0; }, kTimeoutMs));
+    QCOMPARE(launcher.order, QList<int>({0}));
 }
 
 void LimitedTests::test_two_runs_share_one_ledger()

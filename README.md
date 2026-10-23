@@ -949,7 +949,7 @@ restarter.onResult(this, [this](const ResponseData& result) {
 
 limited(context, inputs, launch, [weight,] limit)
 ---
-`limited()` runs one launcher per input through a window instead of starting them all at once. An input is admitted, in input order, while fewer than `limit.maxRunning` items run and, when `limit.budget` is positive, the running items' summed `weight` plus its own fits the budget. As each item settles (finished or canceled) its weight is returned and the next inputs are admitted.
+`limited()` runs one launcher per input through a window instead of starting them all at once. An input is admitted, in input order, while fewer than `limit.maxRunning` items run and, when `limit.budget` is positive, the running items' summed `weight` plus its own fits the budget. As each item's launched future finishes, its slot and weight are returned and the next inputs are admitted.
 
 **When to use**
 
@@ -974,20 +974,21 @@ for (const QFuture<Result>& item : run.items) {
 ```
 
 * **`items`** — one future per input, in input order. Each exists before its input is admitted, so it can be observed right away; admission completes it with the launched future through `Deferred<T>::complete(future, CancelPropagation::Propagate)`, so canceling an admitted item cancels the launched work.
-* **`all`** — settles when every item settles. Canceling it cancels the running items and every queued one, and admits nothing more.
+* **`all`** — completes once every item is skipped or its launched future has finished. Canceling it cancels the running items and every queued one, and admits nothing more.
 * **First item always runs** — when nothing is running, the next item is admitted whatever its weight, so an item heavier than the whole budget still runs, alone.
 * **Skipping** — canceling one item's future before its turn skips it.
+* **Cancel** — canceling an item, `all`, or destroying `context` cancels the item's future at once. Its running slot, weight, and ledger charge return only when the launched future reports finished. A canceled `QPromise` or `QtConcurrent` future finishes when its worker exits, so a canceled item keeps its share, and still blocks admission, until the worker is gone. When only an item is canceled, `all` completes after that item's launched future finishes. Canceling `all` or destroying `context` cancels `all` at once, and the still-running workers return their slots and ledger charges as they exit, so `all.isFinished()` there means the run stopped, while workers may still hold memory.
 * **Lifetime** — destroying `context` cancels every item and `all`.
 * **`Limit::budget` zero or negative** — counts items only; `weight` is still called but never blocks admission.
 * **Deduced `T`** — the result type comes from the launcher's `QFuture<T>`, so no template argument is needed. A launcher that returns anything other than a `QFuture` fails to compile with a `static_assert`.
 * **Count-only overload** — `limited(this, inputs, launch, Limit{2})` drops `weight`. Every item then weighs one, so `Limit::budget` and `Limit::ledger` count items. `Limit` is always the last argument, so a weight lambda with no `Limit` fails to compile.
 * **Weight** — `weight` is called at most once per input, and only for an input the count limit would admit.
 
-`limited()` is not thread-safe: call it from `context`'s thread, the same contract `Restarter` has. `launch` and `weight` run on that thread, and re-admission runs there through `observe(item).context(context, ...)`.
+`limited()` is not thread-safe: call it from `context`'s thread, the same contract `Restarter` has. `launch` and `weight` run on that thread, and re-admission runs there through a `QFutureWatcher` on each launched future, connected to `finished` only and owned by `context`.
 
 **Sharing a cap across runs: `Ledger`**
 
-`Limit::budget` caps one run. When several runs, possibly on different threads, must share one cap, such as a process-wide memory budget, pass a `Ledger` in `Limit::ledger`. Each admitted item charges its weight to the ledger, and the ledger gets it back when the item settles.
+`Limit::budget` caps one run. When several runs, possibly on different threads, must share one cap, such as a process-wide memory budget, pass a `Ledger` in `Limit::ledger`. Each admitted item charges its weight to the ledger, and the ledger gets it back when the item's launched future finishes.
 
 ```c++
 class Ledger : public QObject {
@@ -1006,7 +1007,7 @@ signals:
 * **First item** — the first item of a window always runs and is charged in full through `charge()`, even past the cap. Every other run sharing the ledger then sees the ledger full and holds back while it runs.
 * **Other items** — charged through `tryCharge()`; a refusal stops admission in that run until bytes come back.
 * **Wakeup** — `release()` emits `released()`, and every run sharing the ledger retries admission on its own context's thread. A release in one run therefore admits waiting items in the others.
-* **Lifetime** — the application owns the ledger, and it must outlive every run that uses it. `Limit::ledger` is a non-owning pointer and defaults to `nullptr`, meaning no ledger. When a context is destroyed while items run, their bytes return to the ledger as the launched work settles.
+* **Lifetime** — the application owns the ledger, and it must outlive every run that uses it. `Limit::ledger` is a non-owning pointer and defaults to `nullptr`, meaning no ledger. When a context is destroyed while items run, their bytes return to the ledger as each launched future finishes, on the main thread.
 
 
 Cooperative cancellation inside a worker (QPromise)

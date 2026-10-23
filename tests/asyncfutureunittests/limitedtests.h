@@ -23,6 +23,10 @@ private slots:
     void test_ledger_charged_on_admission_released_on_settle();
     void test_cancel_admitted_item_propagates_and_frees_slot();
     void test_ledger_released_on_context_destruction();
+    void test_cancel_keeps_ledger_until_launched_future_finishes();
+    void test_context_destruction_keeps_ledger_until_launched_future_finishes();
+    void test_all_waits_for_canceled_item_to_finish();
+    void test_cancel_all_settles_at_once_and_keeps_ledger_until_finished();
     void test_two_runs_share_one_ledger();
     void test_ledger_first_item_charged_past_cap();
     void test_empty_inputs();
