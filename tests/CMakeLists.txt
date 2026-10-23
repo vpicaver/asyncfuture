@@ -66,6 +66,7 @@ set(SOURCE_FILES
     asyncfutureunittests/spec.cpp
     asyncfutureunittests/shieldtests.cpp
     asyncfutureunittests/limitedtests.cpp
+    asyncfutureunittests/limitertests.cpp
     asyncfutureunittests/settledtests.cpp
 )
 
@@ -116,6 +117,8 @@ set(HEADERS
     asyncfutureunittests/spec.h
     asyncfutureunittests/shieldtests.h
     asyncfutureunittests/limitedtests.h
+    asyncfutureunittests/limitertests.h
+    asyncfutureunittests/limittestfixtures.h
     asyncfutureunittests/settledtests.h
     asyncfutureunittests/tools.h
 )

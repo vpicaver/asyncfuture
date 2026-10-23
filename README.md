@@ -984,8 +984,9 @@ for (const QFuture<Result>& item : run.items) {
 * **Deduced `T`** — the result type comes from the launcher's `QFuture<T>`, so no template argument is needed. A launcher that returns anything other than a `QFuture` fails to compile with a `static_assert`.
 * **Count-only overload** — `limited(this, inputs, launch, Limit{2})` drops `weight`. Every item then weighs one, so `Limit::budget` and `Limit::ledger` count items. `Limit` is always the last argument, so a weight lambda with no `Limit` fails to compile.
 * **Weight** — `weight` is called at most once per input, and only for an input the count limit would admit.
+* **Launcher throws** — a launcher that throws inside the `limited()` call rethrows from it and stops the run. One that throws when admitted later, after a running item finishes, cancels that item's future with its ledger charge returned, and the run admits the next input.
 
-`limited()` is not thread-safe: call it from `context`'s thread, the same contract `Restarter` has. `launch` and `weight` run on that thread, and re-admission runs there through a `QFutureWatcher` on each launched future, connected to `finished` only and owned by `context`.
+`limited()` is not thread-safe: call it from `context`'s thread, the same contract `Restarter` has. `launch` and `weight` run on that thread, and re-admission runs there through a `QFutureWatcher` on each launched future, connected to `finished` only and owned by the run's `Limiter`, a child of `context`.
 
 **Sharing a cap across runs: `Ledger`**
 
@@ -1010,6 +1011,51 @@ signals:
 * **Wakeup** — `release()` emits `released()`, and every run sharing the ledger retries admission on its own context's thread. A release in one run therefore admits waiting items in the others.
 * **Lifetime** — the application owns the ledger, and it must outlive every run that uses it. `Limit::ledger` is a non-owning pointer and defaults to `nullptr`, meaning no ledger. When a context is destroyed while items run, their bytes return to the ledger as each launched future finishes, on the main thread.
 
+
+Limiter
+---
+`Limiter` is the admission queue behind `limited()`, as a long-lived `QObject` for work that arrives one item at a time from independent callers, with no input list to hand over. It applies the same rules: FIFO admission, `limit.maxRunning`, `limit.budget`, the first-item rule, and the shared `Ledger`.
+
+```c++
+class Limiter : public QObject {
+public:
+    explicit Limiter(Limit limit, QObject* parent = nullptr);
+    ~Limiter();   // cancels every queued item; running items settle on their own
+
+    template <typename Launch>  // Launch: () -> QFuture<T>
+    QFuture<T> admit(Launch launch, qint64 weight = 1);
+
+    int queuedCount() const;    // admitted later
+    int runningCount() const;   // admitted, launched future unfinished
+    const Limit& limit() const;
+};
+```
+
+* **`admit()`** — queues `launch` and returns the future for its result right away. `launch` is called only on admission, on the Limiter's thread, and `T` is deduced from the `QFuture<T>` it returns.
+* **Holding a slot** — an admitted item holds its slot, its `weight`, and its ledger charge until the launched future reports finished.
+* **Cancel** — canceling the returned future before admission skips the item; after admission it cancels the launched future, and the slot returns when that future finishes.
+* **Launcher throws** — a launcher that throws inside `admit()` rethrows from it with the item's ledger charge returned; the item is never admitted. A launcher that throws when admitted later, after a running item finishes, cancels that item's future with its charge returned, and the queue moves on to the next item.
+* **Destruction** — destroying the Limiter cancels every queued item, while each running item keeps its slot and ledger charge until its launched future finishes.
+* **Thread** — call `admit()` from the Limiter's thread only, the same contract `Restarter` has.
+
+A one-at-a-time queue fed from two places:
+
+```c++
+using namespace AsyncFuture;
+
+// One octree build at a time, whoever asks for it.
+Limiter* buildQueue = new Limiter(Limit{1}, this);
+
+QFuture<Octree> fromImport = buildQueue->admit([cloud]() {
+    return QtConcurrent::run(buildOctree, cloud);
+});
+QFuture<Octree> fromReload = buildQueue->admit([path]() {
+    return QtConcurrent::run(loadAndBuildOctree, path);
+});
+// fromReload's launcher runs only once fromImport's build has finished.
+```
+
+`limited()` is built on `Limiter`: each run creates one, admits every input in order, and deletes it once the run settles.
 
 Cooperative cancellation inside a worker (QPromise)
 ---

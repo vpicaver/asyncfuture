@@ -2239,7 +2239,8 @@ struct FutureValue<QFuture<T>> {
     using type = T;
 };
 
-// The weight of every item in a limited() run that has no weight function.
+// The weight of an item given no weight: limited() without a weight function,
+// and Limiter::admit()'s default.
 inline constexpr qint64 kCountOnlyItemWeight = 1;
 
 // Clears a flag on every exit from a scope, including a throw.
@@ -2290,8 +2291,8 @@ struct LimitedControl {
  * limited() run that uses it; the application owns it, and Limit::ledger is a
  * non-owning pointer.
  *
- * released() reaches every run sharing the ledger. Each run receives it on its
- * own context's thread (queued when release() is called on another thread) and
+ * released() reaches every run and Limiter sharing the ledger. Each receives it
+ * on its own thread (queued when release() is called on another thread) and
  * retries admission there.
  */
 class Ledger : public QObject {
@@ -2339,6 +2340,145 @@ struct Limit {
     Ledger* ledger = nullptr; // null = count and budget only
 };
 
+class Limiter;
+
+namespace Private {
+/* One item queued on a Limiter, with its result type erased so the admission
+ * loop is shared by every Limiter and by limited().
+ */
+class LimiterItem {
+public:
+    virtual ~LimiterItem() = default;
+
+    // True when the caller's future settled, which before admission means canceled.
+    virtual bool isSettled() const = 0;
+    virtual void cancel() = 0;
+    // Calls the launcher; may throw.
+    virtual void launch() = 0;
+    // Hands the launched future's result and cancel link to the caller's future.
+    virtual void forwardLaunched() = 0;
+    virtual void whenLaunchedFinished(QObject* context, std::function<void()> onFinished) = 0;
+
+    // Evaluates the weight once, when the item first reaches an open slot.
+    qint64 weight()
+    {
+        if (!m_isWeighed) {
+            m_weight = weigh();
+            m_isWeighed = true;
+        }
+        return m_weight;
+    }
+
+    // Runs onSettled once: when the item is skipped, canceled while queued,
+    // throws from its launcher, or its launched future finishes.
+    void settle()
+    {
+        if (onSettled) {
+            auto settled = std::move(onSettled);
+            onSettled = nullptr;
+            settled();
+        }
+    }
+
+    std::function<void()> onSettled;
+    qint64 ledgerCharge = 0; // the bytes the ledger holds for this item
+
+protected:
+    virtual qint64 weigh() = 0;
+
+private:
+    qint64 m_weight = 0;
+    bool m_isWeighed = false;
+};
+
+template <typename T, typename Launch, typename Weigh>
+class LimiterItemOf : public LimiterItem {
+public:
+    LimiterItemOf(Launch launch, Weigh weigh) :
+        m_launch(std::move(launch)),
+        m_weigh(std::move(weigh))
+    {
+    }
+
+    QFuture<T> future() const { return m_deferred.future(); }
+
+    bool isSettled() const override { return Private::isSettled(m_deferred.future()); }
+    void cancel() override { m_deferred.cancel(); }
+    void launch() override { m_launched = m_launch(); }
+    void forwardLaunched() override { m_deferred.complete(m_launched, CancelPropagation::Propagate); }
+
+    void whenLaunchedFinished(QObject* context, std::function<void()> onFinished) override
+    {
+        Private::whenFinished(m_launched, context, std::move(onFinished));
+    }
+
+protected:
+    qint64 weigh() override { return m_weigh(); }
+
+private:
+    Deferred<T> m_deferred;
+    QFuture<T> m_launched;
+    Launch m_launch;
+    Weigh m_weigh;
+};
+
+class LimiterCore;
+
+// Queues item on limiter and runs admission; rethrows a launcher's exception.
+void enqueue(Limiter& limiter, std::shared_ptr<LimiterItem> item);
+// Cancels and settles every item limiter has yet to admit.
+void cancelQueued(Limiter& limiter);
+} // namespace Private
+
+/* A long-lived admission queue with limited()'s rules, for work that arrives one
+ * item at a time from independent callers. Items are admitted in FIFO order while
+ * fewer than limit.maxRunning run and, when limit.budget is positive, the running
+ * weights plus the item's own fit the budget; the first item of a window always
+ * runs. launch is called only on admission, on this object's thread.
+ *
+ * An admitted item holds its slot, its weight and its ledger charge until the
+ * future launch returned reports finished. Canceling an item's future before
+ * admission skips it; canceling it after admission cancels the launched future.
+ * Destroying the Limiter cancels every queued item, and each running item keeps
+ * its share until its launched future finishes.
+ *
+ * Call admit() from this object's thread only, the same contract Restarter has.
+ */
+class Limiter : public QObject {
+    Q_OBJECT
+public:
+    explicit Limiter(Limit limit, QObject* parent = nullptr);
+    ~Limiter() override;
+
+    // Queues launch and returns the future for its result. A launcher that
+    // throws here rethrows with its ledger charge returned, unadmitted; one
+    // admitted later, after a running item finishes, cancels its own future.
+    template <typename Launch>
+    auto admit(Launch launch, qint64 weight = Private::kCountOnlyItemWeight)
+        -> QFuture<typename Private::FutureValue<std::decay_t<std::invoke_result_t<Launch&>>>::type>
+    {
+        using T = typename Private::FutureValue<std::decay_t<std::invoke_result_t<Launch&>>>::type;
+        auto constantWeight = [weight]() { return weight; };
+        auto item = std::make_shared<Private::LimiterItemOf<T, Launch, decltype(constantWeight)>>(
+            std::move(launch), constantWeight);
+        QFuture<T> future = item->future();
+        Private::enqueue(*this, item);
+        return future;
+    }
+
+    // Items admitted later.
+    int queuedCount() const;
+    // Items admitted whose launched future is unfinished.
+    int runningCount() const;
+    const Limit& limit() const;
+
+private:
+    friend void Private::enqueue(Limiter& limiter, std::shared_ptr<Private::LimiterItem> item);
+    friend void Private::cancelQueued(Limiter& limiter);
+
+    std::shared_ptr<Private::LimiterCore> m_core;
+};
+
 template <typename T>
 struct Limited {
     // One per input, in input order, observable before admission.
@@ -2373,6 +2513,8 @@ struct Limited {
  * Canceling an item cancels its future at once, but a canceled QPromise or
  * QtConcurrent future finishes only when its worker exits, so the item keeps its
  * share until then. Canceling an item's future before admission skips it.
+ * A launcher that throws during limited() itself rethrows and stops the run; one
+ * that throws when admitted later cancels that item, and the run goes on.
  *
  * Limited::cancel() or destroying the context stops the run: every item is
  * canceled at once, and all is canceled after the last launched future finishes
@@ -2389,242 +2531,109 @@ auto limited(QObject* context, const QList<Input>& inputs,
     using T = typename Private::FutureValue<std::decay_t<std::invoke_result_t<Launch&, const Input&>>>::type;
     Q_ASSERT(context);
 
-    struct State : Private::LimitedRun, std::enable_shared_from_this<State> {
-        QObject* context = nullptr;
-        QList<Input> inputs;
-        QList<Deferred<T>> deferreds;
-        QList<QFuture<T>> launchedFutures; // per input, set on admission
-        QList<qint64> ledgerCharges; // per input, the bytes the ledger holds for it
-        QList<qint64> weights; // per input, valid where isWeighed is true
-        QList<bool> isWeighed;
-        QList<bool> isRunning; // per input, admitted and its launched future not yet finished
-        Deferred<void> all;
-        Launch launch;
-        Weight weight;
-        Limit limit;
-        QMetaObject::Connection onContextDestroyed;
-        QMetaObject::Connection onLedgerReleased;
-        int next = 0;
-        int running = 0;
-        int settled = 0;
-        qint64 inFlight = 0;
-        bool admitting = false;
-        bool stopped = false;
-
-        State(QObject* context, const QList<Input>& inputs, Launch launch, Weight weight, Limit limit) :
-            context(context),
-            inputs(inputs),
-            deferreds(inputs.size()),
-            launchedFutures(inputs.size()),
-            ledgerCharges(inputs.size(), 0),
-            weights(inputs.size(), 0),
-            isWeighed(inputs.size(), false),
-            isRunning(inputs.size(), false),
+    struct Run : Private::LimitedRun {
+        Run(Launch launch, Weight weight, qsizetype total) :
             launch(std::move(launch)),
             weight(std::move(weight)),
-            limit(limit)
+            total(total)
         {
         }
 
+        Launch launch;
+        Weight weight;
+        QPointer<Limiter> limiter;
+        QList<QFuture<T>> items;
+        Deferred<void> all;
+        QMetaObject::Connection onContextDestroyed;
+        qsizetype total = 0;
+        qsizetype settled = 0;
+        bool stopped = false;
+
         // A direct all.cancel() reaches stop() through a queued observer, so
-        // admission checks the flag on all as well.
+        // settling checks the flag on all as well.
         bool isStopped() const {
             return stopped || all.future().isCanceled();
         }
 
         bool isDone() const {
-            return settled == inputs.size();
+            return settled == total;
         }
 
-        bool fitsBudget(qint64 itemWeight) const {
-            return limit.budget <= 0 || inFlight + itemWeight <= limit.budget;
-        }
-
-        qint64 weightOf(int index) {
-            if (!isWeighed.at(index)) {
-                weights.replace(index, weight(inputs.at(index)));
-                isWeighed.replace(index, true);
-            }
-            return weights.at(index);
-        }
-
-        // Charges the ledger for the item at index. The first item of a window
-        // is charged in full whether or not it fits, so every run sharing the
-        // ledger sees it; any other item is charged only when it fits.
-        bool chargeLedger(int index, qint64 itemWeight, bool isFirst) {
-            if (limit.ledger == nullptr) {
-                return true;
-            }
-            if (isFirst) {
-                limit.ledger->charge(itemWeight);
-            } else if (!limit.ledger->tryCharge(itemWeight)) {
-                return false;
-            }
-            ledgerCharges.replace(index, itemWeight);
-            return true;
-        }
-
-        void releaseLedger(int index) {
-            const qint64 charge = ledgerCharges.at(index);
-            if (charge > 0) {
-                ledgerCharges.replace(index, 0);
-                limit.ledger->release(charge);
-            }
-        }
-
-        void admit() {
-            // A launcher that settles synchronously, or a ledger release on this
-            // thread, re-enters here; the loop below already continues with the
-            // next input.
-            if (admitting) {
-                return;
-            }
-            admitting = true;
-            const Private::ResetFlag resetAdmitting{admitting};
-            while (!isStopped() && next < inputs.size()) {
-                Deferred<T> deferred = deferreds.at(next);
-                if (Private::isSettled(deferred.future())) {
-                    // Canceled before its turn.
-                    deferred.cancel();
-                    ++next;
-                    markSettled();
-                    continue;
-                }
-
-                // The first item of a window runs whatever its weight.
-                const bool isFirst = running == 0;
-                if (!isFirst && running >= limit.maxRunning) {
-                    break;
-                }
-
-                const int index = next;
-                const qint64 itemWeight = weightOf(index);
-                if (!isFirst && !fitsBudget(itemWeight)) {
-                    break;
-                }
-                if (!chargeLedger(index, itemWeight, isFirst)) {
-                    break;
-                }
-
-                // Admitted before the launcher runs, so a stop() from inside it
-                // leaves this item to settle when its launched future finishes.
-                ++next;
-                QFuture<T> launched;
-                try {
-                    launched = launch(inputs.at(index));
-                } catch (...) {
-                    releaseLedger(index);
-                    if (stopped) {
-                        markSettled();
-                    } else {
-                        next = index;
-                    }
-                    throw;
-                }
-                ++running;
-                inFlight += itemWeight;
-                launchedFutures.replace(index, launched);
-                isRunning.replace(index, true);
-
-                deferred.complete(launched, CancelPropagation::Propagate);
-
-                Private::whenFinished(launched, context, [self = this->shared_from_this(), index]() {
-                    self->release(index);
-                });
-            }
-        }
-
-        // Runs once per admitted item, from the context's watcher or, after the
-        // context is gone, from the fallback watcher.
-        void release(int index) {
-            if (!isRunning.at(index)) {
-                return;
-            }
-            isRunning.replace(index, false);
-            // Counters first: returning the ledger's bytes can re-enter admit()
-            // through released().
-            --running;
-            inFlight -= weights.at(index);
-            releaseLedger(index);
-            markSettled();
-            admit();
-        }
-
-        void disconnectAll() {
-            QObject::disconnect(onContextDestroyed);
-            QObject::disconnect(onLedgerReleased);
-        }
-
-        void markSettled() {
-            ++settled;
+        void markSettled(qsizetype count) {
+            settled += count;
             if (isDone()) {
-                disconnectAll();
+                QObject::disconnect(onContextDestroyed);
                 if (isStopped()) {
                     all.cancel();
                 } else {
                     all.complete();
                 }
+                if (limiter != nullptr) {
+                    limiter->deleteLater();
+                }
             }
         }
 
-        // Cancels every item and counts the unadmitted ones as settled; each
-        // running item settles when its launched future finishes.
+        // Cancels every item; the queued ones settle at once, and each running
+        // item settles when its launched future finishes.
         void stop() override {
             if (stopped || isDone()) {
                 return;
             }
             stopped = true;
-            QObject::disconnect(onLedgerReleased);
-            // Deferred::cancel() is non-const; copy the shared handle, not the list.
-            for (Deferred<T> deferred : std::as_const(deferreds)) {
-                deferred.cancel();
+            if (limiter != nullptr) {
+                Private::cancelQueued(*limiter);
             }
-            while (next < inputs.size()) {
-                ++next;
-                markSettled();
+            for (QFuture<T> item : std::as_const(items)) {
+                item.cancel();
             }
         }
     };
 
-    auto state = std::make_shared<State>(context, inputs, std::move(launch), std::move(weight), limit);
-
-    observe(state->all.future()).context(context, []() {}, [state]() {
-        state->stop();
-    });
-
-    state->onContextDestroyed = QObject::connect(context, &QObject::destroyed, context, [state]() {
-        state->stop();
-        // The context-bound watchers never run now, so each running item settles,
-        // and returns its ledger bytes, when its launched work finishes.
-        for (int i = 0; i < state->isRunning.size(); ++i) {
-            if (state->isRunning.at(i)) {
-                Private::whenFinished(state->launchedFutures.at(i), nullptr, [state, i]() {
-                    state->release(i);
-                });
-            }
-        }
-    });
-
-    if (state->limit.ledger != nullptr) {
-        state->onLedgerReleased = QObject::connect(state->limit.ledger, &Ledger::released, context, [state]() {
-            state->admit();
-        });
-    }
+    auto run = std::make_shared<Run>(std::move(launch), std::move(weight), inputs.size());
 
     Limited<T> result;
-    result.items.reserve(state->deferreds.size());
-    for (const Deferred<T>& deferred : state->deferreds) {
-        result.items.append(deferred.future());
-    }
-    result.all = state->all.future();
+    result.all = run->all.future();
     result.control = std::make_shared<Private::LimitedControl>();
-    result.control->run = state;
+    result.control->run = run;
 
-    if (state->inputs.isEmpty()) {
-        state->all.complete();
-    } else {
-        state->admit();
+    if (inputs.isEmpty()) {
+        run->all.complete();
+        return result;
     }
+
+    // The context owns the run's Limiter, so destroying the context ends it
+    // after destroyed() stops the run.
+    run->limiter = new Limiter(limit, context);
+    run->onContextDestroyed = QObject::connect(context, &QObject::destroyed, run->limiter, [run]() {
+        run->stop();
+    });
+    observe(run->all.future()).context(run->limiter, []() {}, [run]() {
+        run->stop();
+    });
+
+    run->items.reserve(inputs.size());
+    try {
+        for (const Input& input : inputs) {
+            auto launchInput = [run, input]() { return run->launch(input); };
+            auto weighInput = [run, input]() { return run->weight(input); };
+            auto item = std::make_shared<Private::LimiterItemOf<T, decltype(launchInput), decltype(weighInput)>>(
+                std::move(launchInput), std::move(weighInput));
+            item->onSettled = [run]() { run->markSettled(1); };
+            run->items.append(item->future());
+            Private::enqueue(*run->limiter, item);
+        }
+    } catch (...) {
+        // The inputs never queued settle with the stopped run.
+        run->stop();
+        const qsizetype neverQueued = run->total - run->items.size();
+        if (neverQueued > 0) {
+            run->markSettled(neverQueued);
+        }
+        throw;
+    }
+
+    result.items = run->items;
     return result;
 }
 
