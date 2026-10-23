@@ -4,7 +4,7 @@
 ![GitHub Workflow Status](https://github.com/vpicaver/asyncfuture/actions/workflows/windows_build_and_test.yml/badge.svg)
 
 
-AsyncFuture is a header only library. It requires Qt 6.8 or later.
+AsyncFuture is a small static library built with CMake: the templates live in `asyncfuture.h`, and `asyncfuture.cpp` holds the `Ledger` classes. It requires Qt 6.8 or later.
 
 QFuture is used together with QtConcurrent to represent the result of an asynchronous computation. It is a powerful component for multi-thread programming. But its usage is limited to the result of threads, it doesn't work with the asynchronous signal emitted by QObject. And it is a bit trouble to setup the listener function via QFutureWatcher.
 
@@ -22,14 +22,8 @@ Including it into your project
 ### CMake
     add_subdirectory(asyncfuture)
     target_link_libraries(MyLib PRIVATE asyncfuture)
-### QBS
-    references: [ "asyncfuture/asyncfuture.qbs" ]
-    Application {
-        Depends { name: "asyncfuture" }
-    }
 
-### QMake
-    include(asyncfuture/asyncfuture.pri)
+CMake is the only supported build. This fork dropped the qmake (`asyncfuture.pri`) and qbs (`asyncfuture.qbs`) project files when `Ledger` gained a signal, since the library now needs moc.
 
 
 Features
@@ -190,13 +184,7 @@ More examples are available at : [asyncfuture/example.cpp at master · vpicaver/
 Installation
 =============
 
-AsyncFuture is a single header library. You could just download the `asyncfuture.h` in your source tree or install it via qpm
-
-    qpm install async.future.pri
-
-or
-
-    wget https://raw.githubusercontent.com/vpicaver/asyncfuture/master/asyncfuture.h
+Add the repository to your source tree, for example as a git submodule, and include it with `add_subdirectory` as shown in [Including it into your project](#including-it-into-your-project). The templates still work from `asyncfuture.h` alone; `limited()`, `Ledger`, and `ByteLedger` need the compiled library.
 
 API
 ===
@@ -959,7 +947,7 @@ restarter.onResult(this, [this](const ResponseData& result) {
 ```
 
 
-limited(context, inputs, launch, weight, limit)
+limited(context, inputs, launch, [weight,] limit)
 ---
 `limited()` runs one launcher per input through a window instead of starting them all at once. An input is admitted, in input order, while fewer than `limit.maxRunning` items run and, when `limit.budget` is positive, the running items' summed `weight` plus its own fits the budget. As each item settles (finished or canceled) its weight is returned and the next inputs are admitted.
 
@@ -971,10 +959,13 @@ limited(context, inputs, launch, weight, limit)
 ```c++
 using namespace AsyncFuture;
 
-auto run = limited<Result>(this, inputs,
+// Owned by the application and shared by every run; it must outlive them.
+ByteLedger* ledger = application->memoryLedger();
+
+auto run = limited(this, inputs,
     [](const Input& input) { return QtConcurrent::run(process, input); },  // Input -> QFuture<Result>
     [](const Input& input) { return estimatedBytes(input); },              // Input -> qint64
-    Limit{QThread::idealThreadCount(), kBudgetBytes});
+    Limit{QThread::idealThreadCount(), kBudgetBytes, ledger});
 
 for (const QFuture<Result>& item : run.items) {
     observe(item).context(this, [this](const Result& result) { deliver(result); });
@@ -987,9 +978,35 @@ for (const QFuture<Result>& item : run.items) {
 * **First item always runs** — when nothing is running, the next item is admitted whatever its weight, so an item heavier than the whole budget still runs, alone.
 * **Skipping** — canceling one item's future before its turn skips it.
 * **Lifetime** — destroying `context` cancels every item and `all`.
-* **`Limit::budget == 0`** — counts items only; `weight` is still called but never blocks admission.
+* **`Limit::budget` zero or negative** — counts items only; `weight` is still called but never blocks admission.
+* **Deduced `T`** — the result type comes from the launcher's `QFuture<T>`, so no template argument is needed. A launcher that returns anything other than a `QFuture` fails to compile with a `static_assert`.
+* **Count-only overload** — `limited(this, inputs, launch, Limit{2})` drops `weight`. Every item then weighs one, so `Limit::budget` and `Limit::ledger` count items. `Limit` is always the last argument, so a weight lambda with no `Limit` fails to compile.
+* **Weight** — `weight` is called at most once per input, and only for an input the count limit would admit.
 
 `limited()` is not thread-safe: call it from `context`'s thread, the same contract `Restarter` has. `launch` and `weight` run on that thread, and re-admission runs there through `observe(item).context(context, ...)`.
+
+**Sharing a cap across runs: `Ledger`**
+
+`Limit::budget` caps one run. When several runs, possibly on different threads, must share one cap, such as a process-wide memory budget, pass a `Ledger` in `Limit::ledger`. Each admitted item charges its weight to the ledger, and the ledger gets it back when the item settles.
+
+```c++
+class Ledger : public QObject {
+    Q_OBJECT
+public:
+    virtual bool tryCharge(qint64 bytes) = 0; // charges and returns true when the bytes fit
+    virtual void charge(qint64 bytes) = 0;    // charges whether or not the bytes fit
+    virtual void release(qint64 bytes) = 0;   // returns bytes, then emits released()
+signals:
+    void released();
+};
+```
+
+`ByteLedger(cap)` is the shipped implementation: a fixed cap guarded by a mutex, with `cap()` and `charged()` for diagnostics. `tryCharge` refuses without recording anything when the bytes would pass the cap. Zero and negative byte counts are no-ops. Subclass `Ledger` for any other policy; implementations must be thread-safe.
+
+* **First item** — the first item of a window always runs and is charged in full through `charge()`, even past the cap. Every other run sharing the ledger then sees the ledger full and holds back while it runs.
+* **Other items** — charged through `tryCharge()`; a refusal stops admission in that run until bytes come back.
+* **Wakeup** — `release()` emits `released()`, and every run sharing the ledger retries admission on its own context's thread. A release in one run therefore admits waiting items in the others.
+* **Lifetime** — the application owns the ledger, and it must outlive every run that uses it. `Limit::ledger` is a non-owning pointer and defaults to `nullptr`, meaning no ledger. When a context is destroyed while items run, their bytes return to the ledger as the launched work settles.
 
 
 Cooperative cancellation inside a worker (QPromise)

@@ -2223,25 +2223,84 @@ bool isSettled(const Future& future)
 {
     return future.isCanceled() || future.isFinished();
 }
+
+// Unwraps the value type of the QFuture a limited() launcher returns.
+template <typename T>
+struct AlwaysFalse : std::false_type {};
+
+template <typename T>
+struct FutureValue {
+    static_assert(AlwaysFalse<T>::value, "limited(): launch(input) must return a QFuture<T>");
+    using type = void;
+};
+
+template <typename T>
+struct FutureValue<QFuture<T>> {
+    using type = T;
+};
+
+// The weight of every item in a limited() run that has no weight function.
+inline constexpr qint64 kCountOnlyItemWeight = 1;
+
+// Clears a flag on every exit from a scope, including a throw.
+struct ResetFlag {
+    bool& flag;
+    ~ResetFlag() { flag = false; }
+};
 } // namespace Private
 
 /* A process-wide byte ledger that limited() charges on admission and releases
- * when the item settles. Implementations must be thread-safe: several contexts
- * share one ledger.
+ * when the item settles. Implementations must be thread-safe: several contexts,
+ * possibly on different threads, share one ledger. The ledger must outlive every
+ * limited() run that uses it; the application owns it, and Limit::ledger is a
+ * non-owning pointer.
+ *
+ * released() reaches every run sharing the ledger. Each run receives it on its
+ * own context's thread (queued when release() is called on another thread) and
+ * retries admission there.
  */
-class Ledger {
+class Ledger : public QObject {
+    Q_OBJECT
 public:
-    virtual ~Ledger() = default;
+    explicit Ledger(QObject* parent = nullptr);
 
     // Charges bytes and returns true when they fit; returns false and charges nothing otherwise.
     virtual bool tryCharge(qint64 bytes) = 0;
-    // Returns bytes from an earlier successful tryCharge().
+    // Charges bytes whether or not they fit. limited() uses it for the first
+    // item of a window, so an oversize item is visible to every run.
+    virtual void charge(qint64 bytes) = 0;
+    // Returns bytes from an earlier charge. Implementations emit released()
+    // after the bytes are back.
     virtual void release(qint64 bytes) = 0;
+
+signals:
+    // Emitted after release() returns bytes. limited() runs connect to it and
+    // retry admission on their own context thread.
+    void released();
+};
+
+// A Ledger with a fixed cap. charge() may push charged() past cap().
+class ByteLedger : public Ledger {
+    Q_OBJECT
+public:
+    explicit ByteLedger(qint64 cap, QObject* parent = nullptr);
+
+    bool tryCharge(qint64 bytes) override;
+    void charge(qint64 bytes) override;
+    void release(qint64 bytes) override;
+
+    qint64 cap() const;
+    qint64 charged() const;
+
+private:
+    mutable QMutex m_mutex;
+    qint64 m_cap;
+    qint64 m_charged = 0;
 };
 
 struct Limit {
     int maxRunning = 1;
-    qint64 budget = 0; // 0 = count only
+    qint64 budget = 0; // zero or negative = count only
     Ledger* ledger = nullptr; // null = count and budget only
 };
 
@@ -2267,10 +2326,12 @@ struct Limited {
  * Call limited() from the context's thread only; it is not thread-safe, the same
  * contract Restarter has.
  */
-template <typename T, typename Input, typename Launch, typename Weight>
-Limited<T> limited(QObject* context, const QList<Input>& inputs,
-                   Launch launch, Weight weight, Limit limit)
+template <typename Input, typename Launch, typename Weight>
+auto limited(QObject* context, const QList<Input>& inputs,
+             Launch launch, Weight weight, Limit limit)
+    -> Limited<typename Private::FutureValue<std::decay_t<std::invoke_result_t<Launch&, const Input&>>>::type>
 {
+    using T = typename Private::FutureValue<std::decay_t<std::invoke_result_t<Launch&, const Input&>>>::type;
     Q_ASSERT(context);
 
     struct State : std::enable_shared_from_this<State> {
@@ -2278,11 +2339,14 @@ Limited<T> limited(QObject* context, const QList<Input>& inputs,
         QList<Input> inputs;
         QList<Deferred<T>> deferreds;
         QList<qint64> ledgerCharges; // per input, the bytes the ledger holds for it
+        QList<qint64> weights; // per input, valid where isWeighed is true
+        QList<bool> isWeighed;
         Deferred<void> all;
         Launch launch;
         Weight weight;
         Limit limit;
         QMetaObject::Connection onContextDestroyed;
+        QMetaObject::Connection onLedgerReleased;
         int next = 0;
         int running = 0;
         int settled = 0;
@@ -2294,6 +2358,8 @@ Limited<T> limited(QObject* context, const QList<Input>& inputs,
             inputs(inputs),
             deferreds(inputs.size()),
             ledgerCharges(inputs.size(), 0),
+            weights(inputs.size(), 0),
+            isWeighed(inputs.size(), false),
             launch(std::move(launch)),
             weight(std::move(weight)),
             limit(limit)
@@ -2304,15 +2370,32 @@ Limited<T> limited(QObject* context, const QList<Input>& inputs,
             return Private::isSettled(all.future());
         }
 
-        bool fits(qint64 itemWeight) const {
-            if (running >= limit.maxRunning) {
-                return false;
-            }
+        bool fitsBudget(qint64 itemWeight) const {
             return limit.budget <= 0 || inFlight + itemWeight <= limit.budget;
         }
 
-        bool chargesLedger(qint64 itemWeight) {
-            return limit.ledger != nullptr && limit.ledger->tryCharge(itemWeight);
+        qint64 weightOf(int index) {
+            if (!isWeighed.at(index)) {
+                weights.replace(index, weight(inputs.at(index)));
+                isWeighed.replace(index, true);
+            }
+            return weights.at(index);
+        }
+
+        // Charges the ledger for the item at index. The first item of a window
+        // is charged in full whether or not it fits, so every run sharing the
+        // ledger sees it; any other item is charged only when it fits.
+        bool chargeLedger(int index, qint64 itemWeight, bool isFirst) {
+            if (limit.ledger == nullptr) {
+                return true;
+            }
+            if (isFirst) {
+                limit.ledger->charge(itemWeight);
+            } else if (!limit.ledger->tryCharge(itemWeight)) {
+                return false;
+            }
+            ledgerCharges.replace(index, itemWeight);
+            return true;
         }
 
         void releaseLedger(int index) {
@@ -2324,12 +2407,14 @@ Limited<T> limited(QObject* context, const QList<Input>& inputs,
         }
 
         void admit() {
-            // A launcher that settles synchronously re-enters through markSettled();
-            // the loop below already continues with the next input.
+            // A launcher that settles synchronously, or a ledger release on this
+            // thread, re-enters here; the loop below already continues with the
+            // next input.
             if (admitting) {
                 return;
             }
             admitting = true;
+            const Private::ResetFlag resetAdmitting{admitting};
             while (!isStopped() && next < inputs.size()) {
                 Deferred<T> deferred = deferreds.at(next);
                 if (Private::isSettled(deferred.future())) {
@@ -2340,57 +2425,69 @@ Limited<T> limited(QObject* context, const QList<Input>& inputs,
                     continue;
                 }
 
-                const Input& input = inputs.at(next);
-                const qint64 itemWeight = weight(input);
-                // The first item of a window runs whatever its weight, charged
-                // to the ledger only when the ledger has room.
+                // The first item of a window runs whatever its weight.
                 const bool isFirst = running == 0;
-                if (!isFirst && !fits(itemWeight)) {
-                    break;
-                }
-                const bool charged = chargesLedger(itemWeight);
-                if (!isFirst && limit.ledger != nullptr && !charged) {
+                if (!isFirst && running >= limit.maxRunning) {
                     break;
                 }
 
                 const int index = next;
+                const qint64 itemWeight = weightOf(index);
+                if (!isFirst && !fitsBudget(itemWeight)) {
+                    break;
+                }
+                if (!chargeLedger(index, itemWeight, isFirst)) {
+                    break;
+                }
+
+                QFuture<T> launched;
+                try {
+                    launched = launch(inputs.at(index));
+                } catch (...) {
+                    releaseLedger(index);
+                    throw;
+                }
                 ++next;
                 ++running;
                 inFlight += itemWeight;
-                if (charged) {
-                    ledgerCharges.replace(index, itemWeight);
-                }
 
-                deferred.complete(launch(input), CancelPropagation::Propagate);
+                deferred.complete(launched, CancelPropagation::Propagate);
 
                 auto onSettled = [self = this->shared_from_this(), index, itemWeight]() {
                     self->release(index, itemWeight);
                 };
                 observe(deferred.future()).context(context, onSettled, onSettled);
             }
-            admitting = false;
         }
 
         void release(int index, qint64 itemWeight) {
-            releaseLedger(index);
+            // Counters first: returning the ledger's bytes can re-enter admit()
+            // through released().
             --running;
             inFlight -= itemWeight;
+            releaseLedger(index);
             markSettled();
             admit();
+        }
+
+        void disconnectAll() {
+            QObject::disconnect(onContextDestroyed);
+            QObject::disconnect(onLedgerReleased);
         }
 
         void markSettled() {
             ++settled;
             if (settled == inputs.size()) {
-                QObject::disconnect(onContextDestroyed);
+                disconnectAll();
                 all.complete();
             }
         }
 
         void cancelEverything() {
-            QObject::disconnect(onContextDestroyed);
+            disconnectAll();
             all.cancel();
-            for (Deferred<T> deferred : deferreds) {
+            // Deferred::cancel() is non-const; copy the shared handle, not the list.
+            for (Deferred<T> deferred : std::as_const(deferreds)) {
                 deferred.cancel();
             }
         }
@@ -2414,6 +2511,12 @@ Limited<T> limited(QObject* context, const QList<Input>& inputs,
         }
     });
 
+    if (state->limit.ledger != nullptr) {
+        state->onLedgerReleased = QObject::connect(state->limit.ledger, &Ledger::released, context, [state]() {
+            state->admit();
+        });
+    }
+
     Limited<T> result;
     result.items.reserve(state->deferreds.size());
     for (const Deferred<T>& deferred : state->deferreds) {
@@ -2427,6 +2530,18 @@ Limited<T> limited(QObject* context, const QList<Input>& inputs,
         state->admit();
     }
     return result;
+}
+
+/* limited() without a weight function: every item weighs one, so Limit::budget
+ * and Limit::ledger count items.
+ */
+template <typename Input, typename Launch>
+auto limited(QObject* context, const QList<Input>& inputs,
+             Launch launch, Limit limit)
+    -> Limited<typename Private::FutureValue<std::decay_t<std::invoke_result_t<Launch&, const Input&>>>::type>
+{
+    auto countOnlyWeight = [](const Input&) { return Private::kCountOnlyItemWeight; };
+    return limited(context, inputs, std::move(launch), countOnlyWeight, limit);
 }
 
 }
