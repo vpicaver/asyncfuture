@@ -110,12 +110,9 @@ public:
         }
     }
 
-    // Rethrow is for a caller's own admit(); an admission run from a release has
-    // no caller to receive the exception, so the item is canceled and the queue
-    // moves on.
-    enum class LauncherFailure { Rethrow, CancelItem };
-
-    void admit(LauncherFailure onLauncherFailure = LauncherFailure::CancelItem)
+    // A weight function or launcher that throws cancels its item with the
+    // ledger charge returned, and the loop moves on; nothing is rethrown.
+    void admit()
     {
         // A launcher that settles synchronously or admits another item, or a
         // ledger release on this thread, re-enters here; the loop below already
@@ -143,26 +140,28 @@ public:
                 break;
             }
 
-            const qint64 itemWeight = item->weight();
-            if (!isFirst && !fitsBudget(itemWeight)) {
-                break;
-            }
-            if (!chargeLedger(*item, itemWeight, isFirst)) {
-                break;
-            }
-
-            // Admitted before the launcher runs, so canceling the queue from
-            // inside it leaves this item to settle when its launched future finishes.
-            queued.pop_front();
+            qint64 itemWeight = 0;
             try {
+                itemWeight = item->weight();
+                if (!isFirst && !fitsBudget(itemWeight)) {
+                    break;
+                }
+                if (!chargeLedger(*item, itemWeight, isFirst)) {
+                    break;
+                }
+
+                // Admitted before the launcher runs, so canceling the queue from
+                // inside it leaves this item to settle when its launched future finishes.
+                queued.pop_front();
                 item->launch();
             } catch (...) {
+                const auto found = std::find(queued.begin(), queued.end(), item);
+                if (found != queued.end()) {
+                    queued.erase(found);
+                }
                 releaseLedger(*item);
                 item->cancel();
                 item->settle();
-                if (onLauncherFailure == LauncherFailure::Rethrow) {
-                    throw;
-                }
                 continue;
             }
             running.push_back(item);
@@ -228,23 +227,13 @@ public:
     bool admitting = false;
 };
 
-void enqueue(Limiter& limiter, std::shared_ptr<LimiterItem> item)
-{
-    limiter.m_core->queued.push_back(std::move(item));
-    limiter.m_core->admit(LimiterCore::LauncherFailure::Rethrow);
-}
-
-void cancelQueued(Limiter& limiter)
-{
-    limiter.m_core->cancelQueued();
-}
-
 } // namespace Private
 
 Limiter::Limiter(Limit limit, QObject* parent) :
     QObject(parent),
     m_core(std::make_shared<Private::LimiterCore>(this, limit))
 {
+    Q_ASSERT(limit.maxRunning >= 1);
     if (limit.ledger != nullptr) {
         const std::weak_ptr<Private::LimiterCore> core = m_core;
         m_core->onLedgerReleased = connect(limit.ledger, &Ledger::released, this, [core]() {
@@ -260,9 +249,24 @@ Limiter::~Limiter()
     m_core->close();
 }
 
+void Limiter::enqueue(std::shared_ptr<Private::LimiterItem> item)
+{
+    m_core->queued.push_back(std::move(item));
+    m_core->admit();
+}
+
+void Limiter::cancelQueued()
+{
+    m_core->cancelQueued();
+}
+
 int Limiter::queuedCount() const
 {
-    return static_cast<int>(m_core->queued.size());
+    const auto& queued = m_core->queued;
+    return static_cast<int>(std::count_if(queued.begin(), queued.end(),
+                                          [](const std::shared_ptr<Private::LimiterItem>& item) {
+        return !item->isSettled();
+    }));
 }
 
 int Limiter::runningCount() const

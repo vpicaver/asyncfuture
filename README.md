@@ -984,7 +984,8 @@ for (const QFuture<Result>& item : run.items) {
 * **Deduced `T`** — the result type comes from the launcher's `QFuture<T>`, so no template argument is needed. A launcher that returns anything other than a `QFuture` fails to compile with a `static_assert`.
 * **Count-only overload** — `limited(this, inputs, launch, Limit{2})` drops `weight`. Every item then weighs one, so `Limit::budget` and `Limit::ledger` count items. `Limit` is always the last argument, so a weight lambda with no `Limit` fails to compile.
 * **Weight** — `weight` is called at most once per input, and only for an input the count limit would admit.
-* **Launcher throws** — a launcher that throws inside the `limited()` call rethrows from it and stops the run. One that throws when admitted later, after a running item finishes, cancels that item's future with its ledger charge returned, and the run admits the next input.
+* **Launcher throws** — a launcher or weight function that throws cancels that item's future with its ledger charge returned, and the queue moves on; nothing is rethrown. This holds inside the `limited()` call and when the item is admitted later; the run goes on, and `all` still completes. It matches `observe().context()`, where a throw cancels the future.
+* **`Limit::maxRunning`** — must be at least 1.
 
 `limited()` is not thread-safe: call it from `context`'s thread, the same contract `Restarter` has. `launch` and `weight` run on that thread, and re-admission runs there through a `QFutureWatcher` on each launched future, connected to `finished` only and owned by the run's `Limiter`, a child of `context`.
 
@@ -1025,7 +1026,9 @@ public:
     template <typename Launch>  // Launch: () -> QFuture<T>
     QFuture<T> admit(Launch launch, qint64 weight = 1);
 
-    int queuedCount() const;    // admitted later
+    void cancelQueued();        // cancels every item not yet admitted
+
+    int queuedCount() const;    // items still waiting to launch
     int runningCount() const;   // admitted, launched future unfinished
     const Limit& limit() const;
 };
@@ -1034,9 +1037,12 @@ public:
 * **`admit()`** — queues `launch` and returns the future for its result right away. `launch` is called only on admission, on the Limiter's thread, and `T` is deduced from the `QFuture<T>` it returns.
 * **Holding a slot** — an admitted item holds its slot, its `weight`, and its ledger charge until the launched future reports finished.
 * **Cancel** — canceling the returned future before admission skips the item; after admission it cancels the launched future, and the slot returns when that future finishes.
-* **Launcher throws** — a launcher that throws inside `admit()` rethrows from it with the item's ledger charge returned; the item is never admitted. A launcher that throws when admitted later, after a running item finishes, cancels that item's future with its charge returned, and the queue moves on to the next item.
+* **Launcher throws** — a launcher or weight function that throws cancels that item's future with its ledger charge returned, and the queue moves on; nothing is rethrown. This holds inside `admit()` and when the item is admitted later, after a running item finishes.
+* **`cancelQueued()`** — cancels and settles every item not yet admitted; running items keep their slots and ledger charges until their launched futures finish. Later `admit()` calls still work.
+* **`queuedCount()`** — items still waiting to launch; an item whose future is canceled while queued drops out of the count at once.
+* **`Limit::maxRunning`** — must be at least 1; the constructor asserts it.
 * **Destruction** — destroying the Limiter cancels every queued item, while each running item keeps its slot and ledger charge until its launched future finishes.
-* **Thread** — call `admit()` from the Limiter's thread only, the same contract `Restarter` has.
+* **Thread** — call `admit()` and `cancelQueued()` from the Limiter's thread only, the same contract `Restarter` has.
 
 A one-at-a-time queue fed from two places:
 

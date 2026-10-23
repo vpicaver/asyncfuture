@@ -1,4 +1,5 @@
 #include <QTest>
+#include <QThread>
 #include <memory>
 #include <stdexcept>
 #include <asyncfuture.h>
@@ -26,6 +27,28 @@ auto launchOf(AnyLauncher& launcher, int input)
 {
     return [launch = launcher.launch(), input]() { return launch(input); };
 }
+
+// A thread with an event loop and a context object living on it. Deleting the
+// context on its own thread, then quitting and waiting, ends it before any
+// ledger declared ahead of it is destroyed.
+struct WorkerThread {
+    QThread thread;
+    QObject* context = new QObject();
+
+    WorkerThread()
+    {
+        context->moveToThread(&thread);
+        thread.start();
+    }
+
+    ~WorkerThread()
+    {
+        QMetaObject::invokeMethod(context, [doomed = context]() { delete doomed; },
+                                  Qt::BlockingQueuedConnection);
+        thread.quit();
+        thread.wait();
+    }
+};
 
 } // namespace
 
@@ -374,7 +397,7 @@ void LimiterTests::test_admit_from_inside_launcher_queues_behind_running_item()
     QCOMPARE(inner.result(), 1 + kResultOffset);
 }
 
-void LimiterTests::test_throwing_launcher_leaves_ledger_and_counts_unchanged()
+void LimiterTests::test_throwing_launcher_cancels_item_with_ledger_and_counts_unchanged()
 {
     constexpr qint64 throwingWeight = 3;
     constexpr qint64 itemWeight = 5;
@@ -384,13 +407,15 @@ void LimiterTests::test_throwing_launcher_leaves_ledger_and_counts_unchanged()
     Launcher launcher;
     Limiter limiter(Limit{kOneAtATime, kCountOnly, &ledger});
 
+    QFuture<int> throwing;
     bool isThrown = false;
     try {
-        limiter.admit(launchThrowing, throwingWeight);
-    } catch (const std::runtime_error&) {
+        throwing = limiter.admit(launchThrowing, throwingWeight);
+    } catch (...) {
         isThrown = true;
     }
-    QVERIFY(isThrown);
+    QVERIFY(!isThrown);
+    QVERIFY(throwing.isCanceled());
     QCOMPARE(ledger.charged(), qint64(0));
     QCOMPARE(limiter.queuedCount(), 0);
     QCOMPARE(limiter.runningCount(), 0);
@@ -410,6 +435,160 @@ void LimiterTests::test_throwing_launcher_leaves_ledger_and_counts_unchanged()
     QVERIFY(waitUntil(second, kTimeoutMs));
     QVERIFY(waitUntil([&]() { return ledger.charged() == 0; }, kTimeoutMs));
     QCOMPARE(first.result(), kResultOffset);
+}
+
+void LimiterTests::test_launcher_throwing_inside_another_callers_admit_cancels_only_its_item()
+{
+    constexpr qint64 startingCap = 5;
+    constexpr qint64 raisedCap = 100;
+    constexpr qint64 runningWeight = 1;
+    constexpr qint64 oversizeWeight = 10;
+    constexpr qint64 plainWeight = 2;
+
+    FakeLedger ledger(startingCap);
+    DrainEventsOnExit drainBeforeLedgerDies;
+    Launcher launcher;
+    Limiter limiter(Limit{kManyRunning, kCountOnly, &ledger});
+
+    QFuture<int> running = limiter.admit(launchOf(launcher, 0), runningWeight);
+    bool isOversizeLaunched = false;
+    auto launchOversize = [&isOversizeLaunched]() {
+        isOversizeLaunched = true;
+        return launchThrowing();
+    };
+    QFuture<int> oversize = limiter.admit(launchOversize, oversizeWeight);
+    QCOMPARE(limiter.queuedCount(), 1);
+    QCOMPARE(ledger.refusedCount, 1);
+
+    // The raised cap lets the oversize item through on the next caller's admit().
+    ledger.cap = raisedCap;
+    QFuture<int> plain;
+    bool isThrown = false;
+    try {
+        plain = limiter.admit(launchOf(launcher, 1), plainWeight);
+    } catch (...) {
+        isThrown = true;
+    }
+    QVERIFY(!isThrown);
+    QVERIFY(isOversizeLaunched);
+    QVERIFY(oversize.isCanceled());
+    QCOMPARE(launcher.order, QList<int>({0, 1}));
+    QVERIFY(!plain.isCanceled());
+    QCOMPARE(ledger.charged, runningWeight + plainWeight);
+    QCOMPARE(limiter.queuedCount(), 0);
+    QCOMPARE(limiter.runningCount(), 2);
+
+    launcher.complete(0);
+    launcher.complete(1);
+    QVERIFY(waitUntil(plain, kTimeoutMs));
+    QCOMPARE(plain.result(), 1 + kResultOffset);
+    QCOMPARE(running.result(), kResultOffset);
+    QVERIFY(waitUntil([&]() { return ledger.charged == 0; }, kTimeoutMs));
+}
+
+void LimiterTests::test_cancel_queued_cancels_waiting_items_and_keeps_running_one()
+{
+    constexpr int itemCount = 3;
+    constexpr int laterInput = itemCount;
+    Launcher launcher;
+    Limiter limiter(Limit{kOneAtATime});
+
+    QList<QFuture<int>> items;
+    for (int input = 0; input < itemCount; ++input) {
+        items.append(limiter.admit(launchOf(launcher, input)));
+    }
+    QCOMPARE(limiter.queuedCount(), itemCount - 1);
+
+    limiter.cancelQueued();
+    QCOMPARE(limiter.queuedCount(), 0);
+    QCOMPARE(limiter.runningCount(), 1);
+    QVERIFY(!items.at(0).isCanceled());
+    for (int input = 1; input < itemCount; ++input) {
+        QVERIFY(items.at(input).isCanceled());
+    }
+
+    launcher.complete(0);
+    QVERIFY(waitUntil(items.at(0), kTimeoutMs));
+    QCOMPARE(items.at(0).result(), kResultOffset);
+    QVERIFY(waitUntil([&]() { return limiter.runningCount() == 0; }, kTimeoutMs));
+    QCOMPARE(launcher.order, QList<int>({0}));
+
+    // The Limiter keeps admitting after the queue is canceled.
+    QFuture<int> later = limiter.admit(launchOf(launcher, laterInput));
+    QCOMPARE(launcher.order, QList<int>({0, laterInput}));
+    launcher.complete(laterInput);
+    QVERIFY(waitUntil(later, kTimeoutMs));
+    QCOMPARE(later.result(), laterInput + kResultOffset);
+}
+
+void LimiterTests::test_queued_count_drops_canceled_item_before_it_reaches_front()
+{
+    constexpr int itemCount = 3;
+    constexpr int canceledInput = 2;
+    Launcher launcher;
+    Limiter limiter(Limit{kOneAtATime});
+
+    QList<QFuture<int>> items;
+    for (int input = 0; input < itemCount; ++input) {
+        items.append(limiter.admit(launchOf(launcher, input)));
+    }
+    QCOMPARE(limiter.queuedCount(), itemCount - 1);
+
+    QFuture<int> canceled = items.at(canceledInput);
+    canceled.cancel();
+    QCOMPARE(limiter.queuedCount(), itemCount - 2);
+
+    launcher.complete(0);
+    QVERIFY(waitUntil([&]() { return launcher.order.size() == 2; }, kTimeoutMs));
+    QCOMPARE(limiter.queuedCount(), 0);
+
+    launcher.complete(1);
+    QVERIFY(waitUntil([&]() { return limiter.runningCount() == 0; }, kTimeoutMs));
+    QCOMPARE(launcher.order, QList<int>({0, 1}));
+    QCOMPARE(limiter.queuedCount(), 0);
+}
+
+void LimiterTests::test_release_on_worker_thread_wakes_main_thread_limiter()
+{
+    constexpr qint64 ledgerCap = 5;
+    constexpr qint64 workerWeight = ledgerCap;
+    constexpr qint64 mainWeight = 1;
+
+    ByteLedger ledger(ledgerCap);
+    DrainEventsOnExit drainBeforeLedgerDies;
+    WorkerThread worker;
+
+    Deferred<int> workerDefer;
+    QFuture<int> workerItem;
+    QMetaObject::invokeMethod(worker.context, [&]() {
+        auto* workerLimiter = new Limiter(Limit{kManyRunning, kCountOnly, &ledger}, worker.context);
+        workerItem = workerLimiter->admit([workerDefer]() { return workerDefer.future(); }, workerWeight);
+    }, Qt::BlockingQueuedConnection);
+    QCOMPARE(ledger.charged(), workerWeight);
+
+    // The main Limiter's first item is charged past the cap; the second is refused.
+    Launcher launcher;
+    Limiter mainLimiter(Limit{kManyRunning, kCountOnly, &ledger});
+    QFuture<int> mainFirst = mainLimiter.admit(launchOf(launcher, 0), mainWeight);
+    QFuture<int> mainSecond = mainLimiter.admit(launchOf(launcher, 1), mainWeight);
+    QCOMPARE(launcher.order, QList<int>({0}));
+    QCOMPARE(mainLimiter.queuedCount(), 1);
+
+    // The release runs on the worker thread and reaches the main Limiter queued.
+    QMetaObject::invokeMethod(worker.context, [&]() {
+        Deferred<int> defer = workerDefer;
+        defer.complete(kResultOffset);
+    }, Qt::BlockingQueuedConnection);
+    QVERIFY(waitUntil([&]() { return launcher.order.size() == 2; }, kTimeoutMs));
+    QCOMPARE(launcher.order, QList<int>({0, 1}));
+    QVERIFY(waitUntil(workerItem, kTimeoutMs));
+    QCOMPARE(workerItem.result(), kResultOffset);
+
+    launcher.complete(0);
+    launcher.complete(1);
+    QVERIFY(waitUntil(mainSecond, kTimeoutMs));
+    QCOMPARE(mainFirst.result(), kResultOffset);
+    QVERIFY(waitUntil([&]() { return ledger.charged() == 0; }, kTimeoutMs));
 }
 
 void LimiterTests::test_fifo_holds_behind_item_that_does_not_fit()

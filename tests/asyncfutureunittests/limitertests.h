@@ -21,7 +21,11 @@ private slots:
     void test_destroying_limiter_cancels_queued_and_running_settles();
     void test_counts_follow_every_transition();
     void test_admit_from_inside_launcher_queues_behind_running_item();
-    void test_throwing_launcher_leaves_ledger_and_counts_unchanged();
+    void test_throwing_launcher_cancels_item_with_ledger_and_counts_unchanged();
+    void test_launcher_throwing_inside_another_callers_admit_cancels_only_its_item();
+    void test_cancel_queued_cancels_waiting_items_and_keeps_running_one();
+    void test_queued_count_drops_canceled_item_before_it_reaches_front();
+    void test_release_on_worker_thread_wakes_main_thread_limiter();
     void test_fifo_holds_behind_item_that_does_not_fit();
     void test_launcher_throwing_after_release_cancels_item_and_queue_moves_on();
     void test_limited_launcher_throwing_after_release_cancels_item_and_run_completes();

@@ -1,6 +1,11 @@
 #include <QTest>
 #include <QPromise>
+#include <QSemaphore>
+#include <QThreadPool>
+#include <QtConcurrent>
+#include <atomic>
 #include <memory>
+#include <stdexcept>
 #include <vector>
 #include <numeric>
 #include <Automator>
@@ -188,6 +193,19 @@ QList<int> inputRange(int count)
     }
     return inputs;
 }
+
+// Opens the gate and waits for the pool, so a test that fails while its
+// worker is blocked still ends the worker before the pool is destroyed.
+struct ReleaseGateAndWaitForPool {
+    QSemaphore& gate;
+    QThreadPool& pool;
+
+    ~ReleaseGateAndWaitForPool()
+    {
+        gate.release(kItemCount);
+        pool.waitForDone();
+    }
+};
 
 } // namespace
 
@@ -1140,4 +1158,120 @@ void LimitedTests::test_type_deduced_from_launcher()
     QVERIFY(waitUntil(countOnly.all, kTimeoutMs));
     QCOMPARE(weighted.items.at(0).result(), kResultOffset);
     QCOMPARE(countOnly.items.at(0).result(), kResultOffset);
+}
+
+void LimitedTests::test_throwing_weight_cancels_its_item_and_run_completes()
+{
+    constexpr int itemCount = 3;
+    constexpr int throwingInput = 1;
+    constexpr int lastInput = 2;
+
+    QObject context;
+    Launcher launcher;
+    auto weighOrThrow = [](int input) -> qint64 {
+        if (input == throwingInput) {
+            throw std::runtime_error("weight failed");
+        }
+        return kDefaultWeight;
+    };
+
+    Limited<int> run;
+    bool isThrown = false;
+    try {
+        run = limited(&context, inputRange(itemCount), launcher.launch(), weighOrThrow,
+                      Limit{kManyRunning});
+    } catch (...) {
+        isThrown = true;
+    }
+    QVERIFY(!isThrown);
+    QCOMPARE(run.items.size(), itemCount);
+    QVERIFY(run.items.at(throwingInput).isCanceled());
+    QCOMPARE(launcher.order, QList<int>({0, lastInput}));
+
+    launcher.complete(0);
+    launcher.complete(lastInput);
+    QVERIFY(waitUntil(run.all, kTimeoutMs));
+    QVERIFY(!run.all.isCanceled());
+    QCOMPARE(run.items.at(0).result(), kResultOffset);
+    QCOMPARE(run.items.at(lastInput).result(), lastInput + kResultOffset);
+}
+
+void LimitedTests::test_launcher_throwing_during_limited_cancels_its_item_and_run_completes()
+{
+    constexpr int itemCount = 3;
+    constexpr int throwingInput = 1;
+    constexpr int lastInput = 2;
+
+    QObject context;
+    Launcher launcher;
+    auto launchOrThrow = [launch = launcher.launch()](int input) -> QFuture<int> {
+        if (input == throwingInput) {
+            throw std::runtime_error("launch failed");
+        }
+        return launch(input);
+    };
+
+    Limited<int> run;
+    bool isThrown = false;
+    try {
+        run = limited(&context, inputRange(itemCount), launchOrThrow, Limit{kManyRunning});
+    } catch (...) {
+        isThrown = true;
+    }
+    QVERIFY(!isThrown);
+    QVERIFY(run.items.at(throwingInput).isCanceled());
+    QCOMPARE(launcher.order, QList<int>({0, lastInput}));
+
+    launcher.complete(0);
+    launcher.complete(lastInput);
+    QVERIFY(waitUntil(run.all, kTimeoutMs));
+    QVERIFY(!run.all.isCanceled());
+    QCOMPARE(run.items.at(lastInput).result(), lastInput + kResultOffset);
+}
+
+void LimitedTests::test_context_destruction_waits_for_pool_worker_to_exit()
+{
+    constexpr qint64 firstWeight = 3;
+    constexpr qint64 secondWeight = 5;
+    constexpr qint64 ledgerCap = 100;
+    constexpr int poolThreads = 1;
+
+    ByteLedger ledger(ledgerCap);
+    DrainEventsOnExit drainBeforeLedgerDies;
+    QThreadPool pool;
+    pool.setMaxThreadCount(poolThreads);
+    QSemaphore started;
+    QSemaphore gate;
+    std::atomic<bool> isWorkerExited = false;
+    ReleaseGateAndWaitForPool endWorkers{gate, pool};
+
+    auto launch = [&](int input) {
+        return QtConcurrent::run(&pool, [&, input]() {
+            started.release();
+            gate.acquire();
+            isWorkerExited = true;
+            return input + kResultOffset;
+        });
+    };
+    const QList<qint64> weights = {firstWeight, secondWeight};
+    auto weight = [weights](int input) { return weights.at(input); };
+    auto context = std::make_unique<QObject>();
+
+    auto run = limited(context.get(), inputRange(weights.size()), launch, weight,
+                       Limit{kOneAtATime, kCountOnly, &ledger});
+    QVERIFY(started.tryAcquire(1, kTimeoutMs));
+    QCOMPARE(ledger.charged(), firstWeight);
+
+    context.reset();
+    tick();
+    QVERIFY(run.items.at(0).isCanceled());
+    QVERIFY(run.items.at(1).isCanceled());
+    QVERIFY(!run.all.isFinished());
+    QCOMPARE(ledger.charged(), firstWeight);
+
+    gate.release();
+    QVERIFY(waitUntil([&]() { return run.all.isFinished(); }, kTimeoutMs));
+    QVERIFY(isWorkerExited);
+    QVERIFY(run.all.isCanceled());
+    QVERIFY(waitUntil([&]() { return ledger.charged() == 0; }, kTimeoutMs));
 }

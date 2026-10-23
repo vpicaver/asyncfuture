@@ -40,6 +40,9 @@ private slots:
     void test_weight_called_once_per_input();
     void test_count_only_overload();
     void test_type_deduced_from_launcher();
+    void test_throwing_weight_cancels_its_item_and_run_completes();
+    void test_launcher_throwing_during_limited_cancels_its_item_and_run_completes();
+    void test_context_destruction_waits_for_pool_worker_to_exit();
 };
 
 #endif // LIMITEDTESTS_H

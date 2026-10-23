@@ -2335,16 +2335,21 @@ private:
 };
 
 struct Limit {
-    int maxRunning = 1;
+    int maxRunning = 1; // must be at least 1
     qint64 budget = 0; // zero or negative = count only
     Ledger* ledger = nullptr; // null = count and budget only
 };
 
 class Limiter;
 
+template <typename T>
+struct Limited;
+
 namespace Private {
 /* One item queued on a Limiter, with its result type erased so the admission
- * loop is shared by every Limiter and by limited().
+ * loop is shared by every Limiter and by limited(). A launcher or weight
+ * function that throws cancels the item's future with its ledger charge
+ * returned, and the queue moves on; nothing is rethrown.
  */
 class LimiterItem {
 public:
@@ -2353,13 +2358,14 @@ public:
     // True when the caller's future settled, which before admission means canceled.
     virtual bool isSettled() const = 0;
     virtual void cancel() = 0;
-    // Calls the launcher; may throw.
+    // Calls the launcher; may throw, which cancels the item.
     virtual void launch() = 0;
     // Hands the launched future's result and cancel link to the caller's future.
     virtual void forwardLaunched() = 0;
     virtual void whenLaunchedFinished(QObject* context, std::function<void()> onFinished) = 0;
 
-    // Evaluates the weight once, when the item first reaches an open slot.
+    // Evaluates the weight once, when the item first reaches an open slot; may
+    // throw, which cancels the item.
     qint64 weight()
     {
         if (!m_isWeighed) {
@@ -2370,7 +2376,7 @@ public:
     }
 
     // Runs onSettled once: when the item is skipped, canceled while queued,
-    // throws from its launcher, or its launched future finishes.
+    // throws from its launcher or weight function, or its launched future finishes.
     void settle()
     {
         if (onSettled) {
@@ -2423,11 +2429,6 @@ private:
 };
 
 class LimiterCore;
-
-// Queues item on limiter and runs admission; rethrows a launcher's exception.
-void enqueue(Limiter& limiter, std::shared_ptr<LimiterItem> item);
-// Cancels and settles every item limiter has yet to admit.
-void cancelQueued(Limiter& limiter);
 } // namespace Private
 
 /* A long-lived admission queue with limited()'s rules, for work that arrives one
@@ -2435,14 +2436,19 @@ void cancelQueued(Limiter& limiter);
  * fewer than limit.maxRunning run and, when limit.budget is positive, the running
  * weights plus the item's own fit the budget; the first item of a window always
  * runs. launch is called only on admission, on this object's thread.
+ * limit.maxRunning must be at least 1.
  *
  * An admitted item holds its slot, its weight and its ledger charge until the
  * future launch returned reports finished. Canceling an item's future before
  * admission skips it; canceling it after admission cancels the launched future.
- * Destroying the Limiter cancels every queued item, and each running item keeps
- * its share until its launched future finishes.
+ * A launcher or weight function that throws cancels that item's future with its
+ * ledger charge returned, and the queue moves on; nothing is rethrown.
+ * cancelQueued() cancels every item still waiting. Destroying the Limiter
+ * cancels every queued item, and each running item keeps its share until its
+ * launched future finishes.
  *
- * Call admit() from this object's thread only, the same contract Restarter has.
+ * Call admit() and cancelQueued() from this object's thread only, the same
+ * contract Restarter has.
  */
 class Limiter : public QObject {
     Q_OBJECT
@@ -2451,8 +2457,8 @@ public:
     ~Limiter() override;
 
     // Queues launch and returns the future for its result. A launcher that
-    // throws here rethrows with its ledger charge returned, unadmitted; one
-    // admitted later, after a running item finishes, cancels its own future.
+    // throws, here or when admitted later, cancels that item's future with its
+    // ledger charge returned, and the queue moves on; nothing is rethrown.
     template <typename Launch>
     auto admit(Launch launch, qint64 weight = Private::kCountOnlyItemWeight)
         -> QFuture<typename Private::FutureValue<std::decay_t<std::invoke_result_t<Launch&>>>::type>
@@ -2462,19 +2468,27 @@ public:
         auto item = std::make_shared<Private::LimiterItemOf<T, Launch, decltype(constantWeight)>>(
             std::move(launch), constantWeight);
         QFuture<T> future = item->future();
-        Private::enqueue(*this, item);
+        enqueue(item);
         return future;
     }
 
-    // Items admitted later.
+    // Cancels and settles every item not yet admitted; running items keep their slots.
+    void cancelQueued();
+
+    // Items still waiting to launch; an item canceled while queued drops out at once.
     int queuedCount() const;
     // Items admitted whose launched future is unfinished.
     int runningCount() const;
     const Limit& limit() const;
 
 private:
-    friend void Private::enqueue(Limiter& limiter, std::shared_ptr<Private::LimiterItem> item);
-    friend void Private::cancelQueued(Limiter& limiter);
+    template <typename Input, typename Launch, typename Weight>
+    friend auto limited(QObject* context, const QList<Input>& inputs,
+                        Launch launch, Weight weight, Limit limit)
+        -> Limited<typename Private::FutureValue<std::decay_t<std::invoke_result_t<Launch&, const Input&>>>::type>;
+
+    // Queues item and runs admission.
+    void enqueue(std::shared_ptr<Private::LimiterItem> item);
 
     std::shared_ptr<Private::LimiterCore> m_core;
 };
@@ -2513,8 +2527,9 @@ struct Limited {
  * Canceling an item cancels its future at once, but a canceled QPromise or
  * QtConcurrent future finishes only when its worker exits, so the item keeps its
  * share until then. Canceling an item's future before admission skips it.
- * A launcher that throws during limited() itself rethrows and stops the run; one
- * that throws when admitted later cancels that item, and the run goes on.
+ * A launcher or weight function that throws cancels that item's future with its
+ * ledger charge returned, and the queue moves on; nothing is rethrown.
+ * limit.maxRunning must be at least 1.
  *
  * Limited::cancel() or destroying the context stops the run: every item is
  * canceled at once, and all is canceled after the last launched future finishes
@@ -2582,7 +2597,7 @@ auto limited(QObject* context, const QList<Input>& inputs,
             }
             stopped = true;
             if (limiter != nullptr) {
-                Private::cancelQueued(*limiter);
+                limiter->cancelQueued();
             }
             for (QFuture<T> item : std::as_const(items)) {
                 item.cancel();
@@ -2613,24 +2628,14 @@ auto limited(QObject* context, const QList<Input>& inputs,
     });
 
     run->items.reserve(inputs.size());
-    try {
-        for (const Input& input : inputs) {
-            auto launchInput = [run, input]() { return run->launch(input); };
-            auto weighInput = [run, input]() { return run->weight(input); };
-            auto item = std::make_shared<Private::LimiterItemOf<T, decltype(launchInput), decltype(weighInput)>>(
-                std::move(launchInput), std::move(weighInput));
-            item->onSettled = [run]() { run->markSettled(1); };
-            run->items.append(item->future());
-            Private::enqueue(*run->limiter, item);
-        }
-    } catch (...) {
-        // The inputs never queued settle with the stopped run.
-        run->stop();
-        const qsizetype neverQueued = run->total - run->items.size();
-        if (neverQueued > 0) {
-            run->markSettled(neverQueued);
-        }
-        throw;
+    for (const Input& input : inputs) {
+        auto launchInput = [run, input]() { return run->launch(input); };
+        auto weighInput = [run, input]() { return run->weight(input); };
+        auto item = std::make_shared<Private::LimiterItemOf<T, decltype(launchInput), decltype(weighInput)>>(
+            std::move(launchInput), std::move(weighInput));
+        item->onSettled = [run]() { run->markSettled(1); };
+        run->items.append(item->future());
+        run->limiter->enqueue(item);
     }
 
     result.items = run->items;
