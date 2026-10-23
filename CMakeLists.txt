@@ -1,10 +1,17 @@
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.16)
 project(asyncfuture VERSION 1.0.0 LANGUAGES CXX)
 
 option(ENABLE_TESTING "Enable testing for the project" OFF)
 
-add_library(asyncfuture INTERFACE)
-target_include_directories(asyncfuture INTERFACE
+find_package(Qt6 6.8 REQUIRED COMPONENTS Core)
+
+add_library(asyncfuture STATIC
+    asyncfuture.h
+    asyncfuture.cpp
+)
+set_target_properties(asyncfuture PROPERTIES AUTOMOC ON)
+target_link_libraries(asyncfuture PUBLIC Qt6::Core)
+target_include_directories(asyncfuture PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}>
     $<INSTALL_INTERFACE:include>)
 
@@ -14,8 +21,8 @@ endif()
 
 set_target_properties(asyncfuture PROPERTIES PUBLIC_HEADER "asyncfuture.h")
 
-
 install(TARGETS asyncfuture
+    ARCHIVE DESTINATION lib
     LIBRARY DESTINATION lib
     PUBLIC_HEADER DESTINATION include)
 
