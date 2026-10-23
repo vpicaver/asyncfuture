@@ -959,6 +959,39 @@ restarter.onResult(this, [this](const ResponseData& result) {
 ```
 
 
+limited(context, inputs, launch, weight, limit)
+---
+`limited()` runs one launcher per input through a window instead of starting them all at once. An input is admitted, in input order, while fewer than `limit.maxRunning` items run and, when `limit.budget` is positive, the running items' summed `weight` plus its own fits the budget. As each item settles (finished or canceled) its weight is returned and the next inputs are admitted.
+
+**When to use**
+
+- **Bounded fan-out** — a pipeline with hundreds of items where each one decodes something large. Start as many as the memory budget holds, and start the next as each finishes.
+- **Cheap queued inputs** — `launch` is called only on admission, so a queued input stays a small value and the heavy data is built inside the launcher.
+
+```c++
+using namespace AsyncFuture;
+
+auto run = limited<Result>(this, inputs,
+    [](const Input& input) { return QtConcurrent::run(process, input); },  // Input -> QFuture<Result>
+    [](const Input& input) { return estimatedBytes(input); },              // Input -> qint64
+    Limit{QThread::idealThreadCount(), kBudgetBytes});
+
+for (const QFuture<Result>& item : run.items) {
+    observe(item).context(this, [this](const Result& result) { deliver(result); });
+}
+// run.all.cancel() stops admission and cancels every item.
+```
+
+* **`items`** — one future per input, in input order. Each exists before its input is admitted, so it can be observed right away; admission completes it with the launched future through `Deferred<T>::complete(future, CancelPropagation::Propagate)`, so canceling an admitted item cancels the launched work.
+* **`all`** — settles when every item settles. Canceling it cancels the running items and every queued one, and admits nothing more.
+* **First item always runs** — when nothing is running, the next item is admitted whatever its weight, so an item heavier than the whole budget still runs, alone.
+* **Skipping** — canceling one item's future before its turn skips it.
+* **Lifetime** — destroying `context` cancels every item and `all`.
+* **`Limit::budget == 0`** — counts items only; `weight` is still called but never blocks admission.
+
+`limited()` is not thread-safe: call it from `context`'s thread, the same contract `Restarter` has. `launch` and `weight` run on that thread, and re-admission runs there through `observe(item).context(context, ...)`.
+
+
 Cooperative cancellation inside a worker (QPromise)
 ---
 
